@@ -1,2 +1,5 @@
 .stack-work/
 *~
+.*
+resources/
+!resources/*.c

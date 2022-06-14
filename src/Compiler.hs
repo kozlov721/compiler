@@ -62,6 +62,9 @@ instance (MonadFix m) => MonadState s (TardisT bw s m) where
   get = getPast
   put = sendFuture
 
+instance (MonadFix m) => MonadFail (TardisT bw fw m) where
+  fail = error "fail"
+
 type ASM = TardisT BwState FwState (Writer String)
 
 infixl 4 <@>
@@ -93,9 +96,9 @@ evaluate (Constant c) = do
     write $ "mov $" ++ getValue c ++ ", %rax"
 
 evaluate (Variable name) = do
-    getsPast (M.lookup name . _table . _vars) >>= \case
+    use (vars . table . at name) >>= \case
         Nothing -> error $ "Usage of undefined variable \"" ++ name ++ "\""
-        Just (n, t) -> write $ format "{0} -{1}(%rbp), %{2}" [mov, show n, reg]
+        Just (o, t) -> write $ format "{0} -{1}(%rbp), %{2}" [mov, show o, reg]
           where (mov, reg) = getMov t
 
 evaluate (Assignment (Variable name) e) = do
@@ -122,15 +125,27 @@ evaluate (Op op (Just lhs) (Just rhs)) = do
     when (op `elem` ["==", "!=", ">=", "<=", ">", "<"]) $ do
         write "cmp %rax, %rcx"
         write "mov $0, %rax"
-        when (op == "==") (write "sete %al")
+        when (op == "==") (write "sete %al" )
         when (op == "!=") (write "setne %al")
-        when (op == "<") (write "setl %al")
-        when (op == ">") (write "setg %al")
+        when (op == "<" ) (write "setl %al" )
+        when (op == ">" ) (write "setg %al" )
         when (op == ">=") (write "setge %al")
         when (op == "<=") (write "setle %al")
 
-evaluate (Application name [args]) = do
-    error ""
+evaluate (Application f args) = do
+        passArgs ["rdi", "rsi", "rdx", "rcx", "r8", "r9"] args
+        write $ format "call {0}" [f]
+  where
+    passArgs :: [String] -> [Expression] -> ASM ()
+    passArgs _ [] = pure ()
+    passArgs [] (e:es) = do
+        evaluate e
+        write "push %rax"
+        passArgs [] es
+    passArgs (r:rs) (e:es) = do
+        evaluate e
+        write $ format "mov %rax, %{0}" [r]
+        passArgs rs es
 
 
 write :: String -> ASM ()
@@ -153,7 +168,8 @@ generate (Return e) = do
     write "pop %rbp"
     write "ret"
 
-generate (FDefinition t name _ body) = do
+generate (FDefinition t name args body) = do
+    -- generate <@> map (`Declaration` Nothing) args
     write $ ".globl " ++ name
     write $ name ++ ":"
     indent += 4
@@ -161,8 +177,17 @@ generate (FDefinition t name _ body) = do
     write "mov %rsp, %rbp"
     totOffset <- getsFuture _totVarSize
     write $ format "sub ${0}, %rsp" [show totOffset]
+    fillArgs ["rdi", "rsi", "rdx", "rcx", "r8", "r9"] args
     generate body
     indent -= 4
+  where
+    fillArgs :: [String] -> [Var] -> ASM ()
+    fillArgs _ [] = pure ()
+    fillArgs (r:rs) (v:vs) = do
+        generate (Declaration v Nothing)
+        Just (o, t) <- use (vars . table . at (_name v))
+        -- let (mov, reg) = getMov t
+        write $ format "mov %{0}, -{1}(%rbp)" [r, show o]
 
 generate (Declaration (Var t name) rhs) = do
     use (vars . table . at name) >>= \case
@@ -183,8 +208,8 @@ generate (Declaration (Var t name) rhs) = do
 generate (Call e) = evaluate e
 
 generate (Block b) = do
-    mapM_ generate b
-    totSize <- gets $ maximum . map (fst . snd) . M.toList . _table . _vars
+    generate <@> b
+    totSize <- gets $ maximum . (0:) . map (fst . snd) . M.toList . _table . _vars
     modifyBackwards (totVarSize .~ totSize)
 
 generate (If cond ifBranch elseBranch) = do
