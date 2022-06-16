@@ -1,24 +1,33 @@
 int puts(char *str);
+int printf(char *str, int a, int b);
+int getchar();
+int isdigit(char c);
 
-/* int factorial(int n) { */
-/*     int res = 1; */
-/*     while (n) { */
-/*         res = res * n; */
-/*         n = n - 1; */
-/*     } */
-/*     return res; */
-/* } */
+int factorial(int n) {
+    int res = 1;
+    while (n) {
+        res = res * n;
+        n = n - 1;
+    }
+    return res;
+}
+
+int read_num() {
+    int n = 0;
+    int c = getchar();
+    while (isdigit(c)) {
+        n = n * 10;
+        n = n + c - '0';
+        c = getchar();
+    }
+    return n;
+}
 
 int main() {
-    /* int n = 5; */
-    /* int x = factorial(n); */
-    int x = 1;
-    short n = 5;
-    char a = 'a';
-    char A = 65;
-    char *str = "hello";
-    int arr1[3] = {1, 2, 3};
-    /* printf("Factorial of %d is %d\n", n, x); */
-    puts("Hello");
+    puts("Input a number");
+    printf("> ", 0, 0);
+    int n = read_num();
+    int x = factorial(n);
+    printf("The factorial of %d is %d\n", n, factorial(n));
     return 0;
 }

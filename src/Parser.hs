@@ -107,13 +107,7 @@ type_ = do
            ]
 
 var :: Parser Var
-var = do
-    t <- type_
-    name <- identifier
-    option (Var t identifier) $ do
-        len <- brackets integer
-        Var (Pointer_ t len)
-    -- Var t <$> identifier
+var = Var <$> type_ <*> identifier
 
 val :: Parser Value
 val = choice [ try $ D <$> float
@@ -121,7 +115,7 @@ val = choice [ try $ D <$> float
              , C <$> charLiteral
              , do
                  str <- stringLiteral
-                 pure . A $ C <$> str ++ "\0"
+                 pure . A $ C <$> str
              , A <$> braces (commaSep val)
              ]
 

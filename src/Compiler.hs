@@ -89,19 +89,21 @@ showValue :: Value -> String
 showValue (I x) = show x
 showValue (D x) = show x
 showValue (C x) = show x
+showValue (A str@((C _):_)) = show $ map (\(C c) -> c) str
 
 sizeof :: Type -> Int
 sizeof Char_ = 8
 sizeof Short_ = 16
 sizeof Int_ = 32
 sizeof Long_ = 64
+sizeof (Pointer_ _ _) = 64
 
 evaluate :: Expression -> ASM ()
--- evaluate (Constant (S str)) = do
---     lbl <- gets $ M.size . _globals
---     let name = replicate 3 $ chr $ lbl + ord 'a'
---     globals . at name ?= S str
---     write $ format "mov {0}(%rip), %rax" [name]
+evaluate (Constant arr@(A _)) = do
+    lbl <- gets $ M.size . _globals
+    let name = replicate 3 $ chr $ lbl + ord 'a'
+    globals . at name ?= arr
+    write $ format "lea {0}(%rip), %rax" [name]
 evaluate (Constant c) = write $ format "mov ${0}, %rax" [showValue c]
 
 evaluate (Variable name) = do
@@ -147,11 +149,14 @@ evaluate (Application name args) = do
     use (funs . at name) >>= \case
         Nothing -> fail $ "attempt to call an undeclared function " ++ show name
         Just types -> do
-            passArgs ["rdi", "rsi", "rdx", "rcx", "r8", "r9"] (zip types args)
+            usedRegs <- passArgs
+                ["rdi", "rsi", "rdx", "rcx", "r8", "r9"] (zip types args)
+            write "mov $0, %rax"
             write $ format "call {0}" [name]
+            write . format "pop %{0}" . (:[]) <@> usedRegs
   where
-    passArgs :: [String] -> [(Type, Expression)] -> ASM ()
-    passArgs _ [] = pure ()
+    passArgs :: [String] -> [(Type, Expression)] -> ASM [String]
+    passArgs _ [] = pure []
     passArgs [] ((t, e):es) = do
         evaluate e
         write "push %rax"
@@ -159,9 +164,10 @@ evaluate (Application name args) = do
     passArgs (r:rs) ((t, e):es) = do
         evaluate e
         let size = sizeof t
+        write $ format "push %{0}" [r]
         write $ format "{0} %{1}, %{2}"
             [sizedInst "mov" size, sizedReg "rax" size, sizedReg r size]
-        passArgs rs es
+        (r:) <$> passArgs rs es
 
 
 write :: String -> ASM ()
@@ -210,6 +216,7 @@ generate (FDefinition t name args body) = do
     totSize <- use $ vars . maxOffset
     modifyBackwards (totVarSize .~ totSize)
     vars .= vs
+    write ""
   where
     fillArgs :: [String] -> [Var] -> ASM ()
     fillArgs _ [] = pure ()
@@ -233,9 +240,7 @@ generate (Declaration (Var t name) rhs) = do
 generate (Call e) = evaluate e
 
 generate (Block b) = do
-    -- vs <- use vars
     generate <@> b
-    -- vars .= vs -- forget local block variables
 
 generate (If cond ifBranch elseBranch) = do
     evaluate cond
@@ -262,10 +267,23 @@ generate (For ini cond upd body) = do
     write "jmp 1b"
     label "2:"
 
+compile :: Statement -> ASM ()
+compile st = do
+    generate st
+    globs <- gets $ M.toList . _globals
+    unless (null globs) (write ".data" >> writeGlob <@> globs)
+  where
+    writeGlob :: (Identifier, Value) -> ASM ()
+    writeGlob (name, value) = do
+        write $ name ++ ":"
+        indent += 4
+        write $ format ".string {0}" [showValue value]
+        indent -= 4
+
 toAsm :: FilePath -> IO ()
 toAsm path = do
     Right ast <- parseProgram <$> readFile path
-    let asm = execWriter (evalTardisT (generate ast) (empty, empty))
+    let asm = execWriter (evalTardisT (compile ast) (empty, empty))
     pPrint asm
     let asmFile = (init . init) path ++ ".s"
     writeFile asmFile asm
