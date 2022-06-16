@@ -35,10 +35,12 @@ library
   build-depends:
       base >=4.7 && <5
     , containers
+    , extra
     , lens
     , mtl
     , parsec
     , pretty-simple
+    , process
     , tardis
     , text-format-simple
   default-language: Haskell2010
@@ -49,15 +51,17 @@ executable compiler-exe
       Paths_compiler
   hs-source-dirs:
       app
-  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N -DDEBUG
   build-depends:
       base >=4.7 && <5
     , compiler
     , containers
+    , extra
     , lens
     , mtl
     , parsec
     , pretty-simple
+    , process
     , tardis
     , text-format-simple
   default-language: Haskell2010
@@ -74,10 +78,12 @@ test-suite compiler-test
       base >=4.7 && <5
     , compiler
     , containers
+    , extra
     , lens
     , mtl
     , parsec
     , pretty-simple
+    , process
     , tardis
     , text-format-simple
   default-language: Haskell2010

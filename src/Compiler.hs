@@ -9,7 +9,7 @@
 {-# HLINT ignore "Use newtype instead of data" #-}
 
 
-module Compiler where
+module Compiler ( compile ) where
 
 import Parser
 import Utils
@@ -101,7 +101,7 @@ sizeof (Pointer_ _ _) = 64
 evaluate :: Expression -> ASM ()
 evaluate (Constant arr@(A _)) = do
     lbl <- gets $ M.size . _globals
-    let name = replicate 3 $ chr $ lbl + ord 'a'
+    let name = format ".L{0}" [show lbl]
     globals . at name ?= arr
     write $ format "lea {0}(%rip), %rax" [name]
 evaluate (Constant c) = write $ format "mov ${0}, %rax" [showValue c]
@@ -267,8 +267,8 @@ generate (For ini cond upd body) = do
     write "jmp 1b"
     label "2:"
 
-compile :: Statement -> ASM ()
-compile st = do
+toAsm :: Statement -> ASM ()
+toAsm st = do
     generate st
     globs <- gets $ M.toList . _globals
     unless (null globs) (write ".data" >> writeGlob <@> globs)
@@ -280,10 +280,7 @@ compile st = do
         write $ format ".string {0}" [showValue value]
         indent -= 4
 
-toAsm :: FilePath -> IO ()
-toAsm path = do
-    Right ast <- parseProgram <$> readFile path
-    let asm = execWriter (evalTardisT (compile ast) (empty, empty))
-    pPrint asm
-    let asmFile = (init . init) path ++ ".s"
-    writeFile asmFile asm
+compile :: String -> String
+compile str = case parseProgram str of
+    Left err -> error $ show err
+    Right ast -> execWriter (evalTardisT (toAsm ast) (empty, empty))
