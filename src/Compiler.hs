@@ -14,7 +14,7 @@ module Compiler ( compile ) where
 import Parser
 import Utils
 
-import Control.Lens hiding (Empty)
+import Control.Lens hiding (snoc, Empty)
 import Control.Monad.State
 import Control.Monad.Tardis
 import Control.Monad.Writer
@@ -22,12 +22,13 @@ import Data.Char            ( ord, chr )
 import Data.Map             ( Map )
 import Text.Format
 import Text.Pretty.Simple   ( pPrint )
-
+import Data.List.Extra ( unsnoc, snoc )
 import qualified Data.Map as M
 import Data.Maybe (isJust, fromJust, fromMaybe, isNothing)
 
 type Offset = Int
-data VarsTable = VarsTable { _table     :: Map String (Offset, Type)
+type Size = Int
+data VarsTable = VarsTable { _table     :: Map String (Offset, Size)
                            , _maxOffset :: Int
                            }
 
@@ -35,6 +36,8 @@ data FwState = FwState { _vars    :: VarsTable
                        , _funs    :: Map Identifier [Type]
                        , _indent  :: Int
                        , _globals :: Map Identifier Value
+                       , _nlabels :: Int
+                       , _loop    :: (String, String)
                        }
 
 data BwState = BwState { _totVarSize :: Int }
@@ -58,6 +61,8 @@ instance Empty FwState where
                   , _funs = mempty
                   , _globals = mempty
                   , _indent = 0
+                  , _nlabels = 0
+                  , _loop = ("", "")
                   }
 
 instance Empty BwState where
@@ -77,14 +82,6 @@ infixl 4 <@>
 (<@>) :: (Foldable t, Monad m) => (a -> m b) -> t a -> m ()
 f <@> m = mapM_ f m
 
-
-opTable :: Map String String
-opTable = M.fromList [ ("+", "add")
-                     , ("-", "sub")
-                     , ("*", "imul")
-                     , ("/", "idiv")
-                     ]
-
 showValue :: Value -> String
 showValue (I x) = show x
 showValue (D x) = show x
@@ -97,20 +94,19 @@ sizeof Short_ = 16
 sizeof Int_ = 32
 sizeof Long_ = 64
 sizeof (Pointer_ _ _) = 64
+sizeof VarArgs_ = 64
 
 saveResult :: Identifier -> ASM ()
 saveResult name = do
     use (vars . table . at name) >>= \case
         Nothing -> error $ "Assignment to an undefined variable " ++ show name
-        Just (n, t)  -> write $ format "{0} %{1}, -{2}(%rbp)"
+        Just (n, size)  -> write $ format "{0} %{1}, -{2}(%rbp)"
             [sizedInst "mov" size, sizedReg "rax" size, show n]
-          where size = sizeof t
-
 
 evaluate :: Expression -> ASM ()
 evaluate (Constant arr@(A _)) = do
     lbl <- gets $ M.size . _globals
-    let name = format ".L{0}" [show lbl]
+    let name = format ".LC{0}" [show lbl]
     globals . at name ?= arr
     write $ format "lea {0}(%rip), %rax" [name]
 evaluate (Constant c) = write $ format "mov ${0}, %rax" [showValue c]
@@ -118,9 +114,8 @@ evaluate (Constant c) = write $ format "mov ${0}, %rax" [showValue c]
 evaluate (Variable name) = do
     use (vars . table . at name) >>= \case
         Nothing -> error $ "Usage of undefined variable " ++ show name
-        Just (o, t) -> write $ format "{0} -{1}(%rbp), %{2}"
+        Just (o, size) -> write $ format "{0} -{1}(%rbp), %{2}"
             [sizedInst "mov" size, show o, sizedReg "rax" size]
-          where size = sizeof t
 
 evaluate (Assignment (Variable name) e) = do
     evaluate e
@@ -128,12 +123,12 @@ evaluate (Assignment (Variable name) e) = do
 
 evaluate (Op op (Just lhs) (Just rhs)) = do
     write "push %rcx"
-    evaluate lhs
-    write "push %rax"
     evaluate rhs
+    write "push %rax"
+    evaluate lhs
     write "pop %rcx"
     when (op `elem` ["==", "!=", ">=", "<=", ">", "<"]) $ do
-        write "cmp %rax, %rcx"
+        write "cmp %rcx, %rax"
         write "mov $0, %rax"
         when (op == "==") (write "sete %al" )
         when (op == "!=") (write "setne %al")
@@ -142,13 +137,13 @@ evaluate (Op op (Just lhs) (Just rhs)) = do
         when (op == ">=") (write "setge %al")
         when (op == "<=") (write "setle %al")
     when (op == "+") (write "add %rcx, %rax")
-    when (op == "-") (write "sub %rax, %rcx" >> write "mov %rcx, %rax")
+    when (op == "-") (write "sub %rcx, %rax")
     when (op == "*") (write "imul %rcx")
     when (op == "/" || op == "%") $ do
         write "push %rdx"
-        write "mov $0, %edx"
+        write "mov $0, %rdx"
         write "idiv %ecx"
-        when (op == "%") (write "movl %edx, %eax")
+        when (op == "%") (write "mov %rdx, %rax")
         write "pop %rdx"
     write "pop %rcx"
 
@@ -158,13 +153,13 @@ evaluate (Op op Nothing (Just x@(Variable name))) = do
     when (op == "++") (write "inc %rax")
     saveResult name
 
-
 evaluate (Application name args) = do
     use (funs . at name) >>= \case
         Nothing -> fail $ "attempt to call an undeclared function " ++ show name
         Just types -> do
             usedRegs <- passArgs
-                ["rdi", "rsi", "rdx", "rcx", "r8", "r9"] (zip types args)
+                ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
+                (zip (types ++ repeat VarArgs_) args)
             write "mov $0, %rax"
             write $ format "call {0}" [name]
             write . format "pop %{0}" . (:[]) <@> usedRegs
@@ -183,7 +178,6 @@ evaluate (Application name args) = do
             [sizedInst "mov" size, sizedReg "rax" size, sizedReg r size]
         (r:) <$> passArgs rs es
 
-
 write :: String -> ASM ()
 write str = do
     n <- getsPast _indent
@@ -194,8 +188,13 @@ write str = do
 label :: String -> ASM ()
 label str = do
     indent -= 2
-    write str
+    write $ str ++ ":"
     indent += 2
+
+newLabel :: ASM String
+newLabel = do
+    n <- nlabels <<+= 1
+    pure $ format ".L0{0}" [show n]
 
 generate :: Statement -> ASM ()
 generate (Return e) = do
@@ -226,18 +225,18 @@ generate (FDefinition t name args body) = do
     fillArgs ["rdi", "rsi", "rdx", "rcx", "r8", "r9"] args
     generate body
 
-    indent -= 4
     totSize <- use $ vars . maxOffset
     modifyBackwards (totVarSize .~ totSize)
     vars .= vs
+    when (t == Void_) $ generate $ Return $ Constant $ I 0
+    indent -= 4
     write ""
   where
     fillArgs :: [String] -> [Var] -> ASM ()
     fillArgs _ [] = pure ()
     fillArgs (r:rs) (v:vs) = do
         generate (Declaration v Nothing)
-        Just (o, t) <- use (vars . table . at (_name v))
-        let size = sizeof t
+        Just (o, size) <- use (vars . table . at (_name v))
         write $ format "{0} %{1}, -{2}(%rbp)" [sizedInst "mov" size, sizedReg r size, show o]
 
 generate (Declaration (Var t name) rhs) = do
@@ -246,40 +245,49 @@ generate (Declaration (Var t name) rhs) = do
         Nothing -> do
             let o = sizeof t `div` 8
             newOffset <- vars . maxOffset <+= o
-            vars . table . at name ?= (newOffset, t)
+            vars . table . at name ?= (newOffset, sizeof t)
     case rhs of
         Nothing -> pure ()
         Just e  -> evaluate $ Assignment (Variable name) e
 
-generate (Call e) = evaluate e
-
-generate (Block b) = do
-    generate <@> b
-
 generate (If cond ifBranch elseBranch) = do
     evaluate cond
     write "cmpl $0, %eax"
-    write "jz 1f"
+    els <- newLabel
+    end <- newLabel
+    write $ format "je {0}" [els]
     generate ifBranch
-    label "1:"
+    write $ format "jmp {0}" [end]
+    label els
     generate <@> elseBranch
+    label end
 
 generate (While cond body) = do
-    label "1:"
+    begin <- newLabel
+    end <- newLabel
+    (prevBegin, prevEnd) <- loop <<.= (begin, end)
+    label begin
     evaluate cond
-    write "jz 2f"
+    write "cmpl $0, %eax"
+    write $ format "je {0}" [end]
     generate body
-    write "jmp 1b"
-    label "2:"
+    write $ format "jmp {0}" [begin]
+    label end
+    loop .= (prevBegin, prevEnd)
 
-generate (For ini cond upd body) = do
+generate (For ini c upd body@(Block b)) = do
     evaluate <@> ini
-    label "1:"
-    when (isJust cond) (evaluate <@> cond >> write "jz 2f")
-    generate body
-    evaluate <@> upd
-    write "jmp 1b"
-    label "2:"
+    let cond = fromMaybe (Constant (I 1)) c
+    generate $ While cond $ case upd of
+        Just u -> Block (b `snoc` Call u)
+        _ -> body
+
+generate (Call e) = evaluate e
+generate (Block b) = generate <@> b
+generate (Label name) = label name
+generate (Goto name) = write $ format "jmp {0}" [name]
+generate Continue = use (loop . _1) >>= write . format "jmp {0}" . (:[])
+generate Break    = use (loop . _2) >>= write . format "jmp {0}" . (:[])
 
 toAsm :: Statement -> ASM ()
 toAsm st = do
