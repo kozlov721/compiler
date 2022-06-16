@@ -1,13 +1,14 @@
-int puts(char *str);
-int printf(char *str, int a, int b);
+// so the compiler won't complain about undeclared functions
+int puts(char *);
+int printf(char *, int, int);
 int getchar();
-int isdigit(char c);
+int isdigit(char);
 
 int factorial(int n) {
     int res = 1;
     while (n) {
-        res = res * n;
-        n = n - 1;
+        res *= n;
+        --n;
     }
     return res;
 }
@@ -16,8 +17,8 @@ int read_num() {
     int n = 0;
     int c = getchar();
     while (isdigit(c)) {
-        n = n * 10;
-        n = n + c - '0';
+        n *= 10;
+        n += c - '0';
         c = getchar();
     }
     return n;

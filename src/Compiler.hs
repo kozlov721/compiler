@@ -98,6 +98,15 @@ sizeof Int_ = 32
 sizeof Long_ = 64
 sizeof (Pointer_ _ _) = 64
 
+saveResult :: Identifier -> ASM ()
+saveResult name = do
+    use (vars . table . at name) >>= \case
+        Nothing -> error $ "Assignment to an undefined variable " ++ show name
+        Just (n, t)  -> write $ format "{0} %{1}, -{2}(%rbp)"
+            [sizedInst "mov" size, sizedReg "rax" size, show n]
+          where size = sizeof t
+
+
 evaluate :: Expression -> ASM ()
 evaluate (Constant arr@(A _)) = do
     lbl <- gets $ M.size . _globals
@@ -108,33 +117,21 @@ evaluate (Constant c) = write $ format "mov ${0}, %rax" [showValue c]
 
 evaluate (Variable name) = do
     use (vars . table . at name) >>= \case
-        Nothing -> error $ "Usage of undefined variable \"" ++ name ++ "\""
+        Nothing -> error $ "Usage of undefined variable " ++ show name
         Just (o, t) -> write $ format "{0} -{1}(%rbp), %{2}"
             [sizedInst "mov" size, show o, sizedReg "rax" size]
           where size = sizeof t
 
 evaluate (Assignment (Variable name) e) = do
     evaluate e
-    use (vars . table . at name) >>= \case
-        Nothing -> error $ "Assignment to an undefined variable " ++ show name
-        Just (n, t)  -> write $ format "{0} %{1}, -{2}(%rbp)"
-            [sizedInst "mov" size, sizedReg "rax" size, show n]
-          where size = sizeof t
+    saveResult name
 
 evaluate (Op op (Just lhs) (Just rhs)) = do
+    write "push %rcx"
     evaluate lhs
     write "push %rax"
     evaluate rhs
     write "pop %rcx"
-    when (op == "+") (write "add %rcx, %rax")
-    when (op == "-") (write "sub %rax, %rcx" >> write "mov %rcx, %rax")
-    when (op == "*") (write "imul %rcx")
-    when (op == "/" || op == "%") $ do
-        write "push %rdx"
-        write "mov $0, %edx"
-        write "idiv %ecx"
-        when (op == "%") (write "movl %edx, %eax")
-        write "pop %rdx"
     when (op `elem` ["==", "!=", ">=", "<=", ">", "<"]) $ do
         write "cmp %rax, %rcx"
         write "mov $0, %rax"
@@ -144,6 +141,23 @@ evaluate (Op op (Just lhs) (Just rhs)) = do
         when (op == ">" ) (write "setg %al" )
         when (op == ">=") (write "setge %al")
         when (op == "<=") (write "setle %al")
+    when (op == "+") (write "add %rcx, %rax")
+    when (op == "-") (write "sub %rax, %rcx" >> write "mov %rcx, %rax")
+    when (op == "*") (write "imul %rcx")
+    when (op == "/" || op == "%") $ do
+        write "push %rdx"
+        write "mov $0, %edx"
+        write "idiv %ecx"
+        when (op == "%") (write "movl %edx, %eax")
+        write "pop %rdx"
+    write "pop %rcx"
+
+evaluate (Op op Nothing (Just x@(Variable name))) = do
+    evaluate x
+    when (op == "--") (write "dec %rax")
+    when (op == "++") (write "inc %rax")
+    saveResult name
+
 
 evaluate (Application name args) = do
     use (funs . at name) >>= \case
@@ -193,11 +207,11 @@ generate (Return e) = do
 generate (FDeclaration t name args) = do
     use (funs . at name) >>= \case
         Just _ -> fail $ "multiple declarations of function " ++ show name
-        Nothing -> funs . at name ?= map _t args
+        Nothing -> funs . at name ?= args
 
 generate (FDefinition t name args body) = do
     record <- use $ funs . at name
-    when (isNothing record) (generate (FDeclaration t name args))
+    when (isNothing record) (generate (FDeclaration t name (_t <$> args)))
     write $ ".globl " ++ name
     write $ name ++ ":"
 

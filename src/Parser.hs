@@ -46,7 +46,7 @@ data Statement = If Expression Statement (Maybe Statement)
                | Call Expression
                | Return Expression
                | Declaration Var (Maybe Expression)
-               | FDeclaration Type Identifier [Var]
+               | FDeclaration Type Identifier [Type]
                | FDefinition Type Identifier [Var] Statement
                | Goto Identifier
                | Break
@@ -160,7 +160,7 @@ expr =  buildExpressionParser table term
               ]
             , [ binary "&&" AssocLeft ]
             , [ binary "||" AssocLeft ]
-            , [ binary op AssocRight
+            , [ assignMod op AssocRight
               | op <- [ "+=", "-=", "*=", "/=", "%="
                       , "&=", "|=", "^=", ">>=", "<<=" ]
               ]
@@ -169,10 +169,14 @@ expr =  buildExpressionParser table term
     infixOp op l r  = Op op (Just l) (Just r)
     prefixOp op r   = Op op Nothing (Just r)
     postfixOp op l  = Op op (Just l) Nothing
-    assign name  = Infix   (try (reservedOp name) $> Assignment)
-    binary name  = Infix   (try (reservedOp name) $> infixOp name)
-    prefix name  = Prefix  (try (reservedOp name) $> prefixOp name)
-    postfix name = Postfix (try (reservedOp name) $> prefixOp name)
+    assign name     = Infix   $ try (reservedOp name) $> Assignment
+    assignMod name  = Infix   $ do
+        try $ reservedOp name
+        let op = init name
+        pure $ \lhs rhs -> Assignment lhs $ Op op (Just lhs) (Just rhs)
+    binary name     = Infix   $ try (reservedOp name) $> infixOp name
+    prefix name     = Prefix  $ try (reservedOp name) $> prefixOp name
+    postfix name    = Postfix $ try (reservedOp name) $> prefixOp name
 
 semiStatement :: Parser Statement
 semiStatement = choice
@@ -200,20 +204,22 @@ statement = semiStatement <|> choice
             _         -> fail "ill-formed 'for' declaration"
     ]
 
-external :: Parser Statement
-external = do
-    t  <- type_
-    i  <- identifier
-    vs <- parens (commaSep var)
-    option False (semi $> True) >>= \case
-        True  -> pure $ FDeclaration t i vs
-        False -> FDefinition t i vs <$> block
+topLevel :: Parser Statement
+topLevel = do
+    t <- type_
+    name <- identifier
+    choice $ map try
+        [ FDefinition  t name <$> parens (commaSep var)   <*> block
+        , FDeclaration t name
+            <$> parens (commaSep (type_ <* optional identifier)) <* semi
+        ]
+
 
 block :: Parser Statement
 block = Block <$> (braces . many . lexeme) statement
 
 program :: Parser Statement
-program = whiteSpace >> Block <$> many (lexeme external)
+program = whiteSpace >> Block <$> many (lexeme topLevel)
 
 parseProgram :: String -> Either ParseError Statement
 parseProgram = parse program ""
