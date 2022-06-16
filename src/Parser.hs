@@ -22,7 +22,9 @@ data Type = Int_
           | Char_
           | Long_
           | Pointer_ Type (Maybe Integer)
-          deriving ( Show )
+          | VarArgs_
+          | Void_
+          deriving ( Show, Eq )
 
 data Value = I Integer
            | D Double
@@ -51,6 +53,7 @@ data Statement = If Expression Statement (Maybe Statement)
                | Goto Identifier
                | Break
                | Continue
+               | Label Identifier
                | Block [Statement]
                deriving ( Show )
 
@@ -100,6 +103,8 @@ type_ = do
                 , reserved "short" $> Short_
                 , reserved "char" $> Char_
                 , reserved "long" $> Long_
+                , reserved "void" $> Void_
+                , lexeme (string "...") $> VarArgs_
                 ]
     choice [ reservedOp "*" $> Pointer_ t Nothing
            , Pointer_ t <$> (Just <$> brackets integer)
@@ -107,7 +112,11 @@ type_ = do
            ]
 
 var :: Parser Var
-var = Var <$> type_ <*> identifier
+var = do
+    t <- type_
+    if   t == VarArgs_
+    then pure (Var VarArgs_ "...")
+    else Var t <$> identifier
 
 val :: Parser Value
 val = choice [ try $ D <$> float
@@ -193,15 +202,16 @@ statement = semiStatement <|> choice
     [ reserved "while" >> While <$> parens expr <*> block
     , do
         reserved "if"
-        e <- parens expr
-        b <- block <|> statement
-        b'<- optionMaybe (try (reserved "else") >> (block <|> statement))
-        pure $ If e b b'
+        cond <- parens expr
+        ifB <- block <|> statement
+        elseB <- optionMaybe (try (reserved "else") >> (block <|> statement))
+        pure $ If cond ifB elseB
     , do
         reserved "for"
         parens (semiSep (optionMaybe (try expr))) >>= \case
             [ini, cond, upd] -> For ini cond upd <$> block
             _         -> fail "ill-formed 'for' declaration"
+    , Label <$> identifier <* colon
     ]
 
 topLevel :: Parser Statement
@@ -209,17 +219,19 @@ topLevel = do
     t <- type_
     name <- identifier
     choice $ map try
-        [ FDefinition  t name <$> parens (commaSep var)   <*> block
-        , FDeclaration t name
-            <$> parens (commaSep (type_ <* optional identifier)) <* semi
+        [ do
+            args <- parens (commaSep var)
+            FDefinition t name args <$> block
+        , do
+            types <- parens (commaSep (type_ <* optional identifier))
+            FDeclaration t name types <$ semi
         ]
-
 
 block :: Parser Statement
 block = Block <$> (braces . many . lexeme) statement
 
 program :: Parser Statement
-program = whiteSpace >> Block <$> many (lexeme topLevel)
+program = whiteSpace >> Block <$> many (lexeme topLevel) <* eof
 
 parseProgram :: String -> Either ParseError Statement
 parseProgram = parse program ""
