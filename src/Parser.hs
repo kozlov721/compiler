@@ -21,9 +21,13 @@ data Type = Int_
           | Short_
           | Char_
           | Long_
+          | Pointer_ Type (Maybe Integer)
           deriving ( Show )
 
-data Value = I Integer | D Double | C Char deriving ( Show )
+data Value = I Integer
+           | D Double
+           | C Char
+           | A [Value] deriving ( Show )
 
 data Var = Var { _t :: Type
                , _name :: Identifier
@@ -57,7 +61,7 @@ langDef = emptyDef { P.commentStart    = "/*"
                    , P.reservedNames   = [ "return" , "if" , "else" , "while"
                                          , "for" , "void" , "char" , "int"
                                          , "double" , "break" , "continue"
-                                         , "goto" , "sizeof", "long"
+                                         , "goto" , "sizeof", "long", "short"
                                          ]
                    , P.reservedOpNames =
                          let simple = [ "+" , "-" , "*" , "/"
@@ -73,6 +77,7 @@ lexer = P.makeTokenParser langDef
 lexeme        = P.lexeme lexer
 parens        = P.parens lexer
 braces        = P.braces lexer
+brackets      = P.brackets lexer
 identifier    = P.identifier lexer
 reserved      = P.reserved lexer
 reservedOp    = P.reservedOp lexer
@@ -90,21 +95,34 @@ commaSep      = P.commaSep lexer
 semiSep       = P.semiSep lexer
 
 type_ :: Parser Type
-type_ = choice [ reserved "int" $> Int_
-               , reserved "short" $> Short_
-               , reserved "char" $> Char_
-               , reserved "long" $> Long_
-               ]
+type_ = do
+    t <- choice [ reserved "int" $> Int_
+                , reserved "short" $> Short_
+                , reserved "char" $> Char_
+                , reserved "long" $> Long_
+                ]
+    choice [ reservedOp "*" $> Pointer_ t Nothing
+           , Pointer_ t <$> (Just <$> brackets integer)
+           , pure t
+           ]
 
 var :: Parser Var
 var = do
     t <- type_
-    Var t <$> identifier
+    name <- identifier
+    option (Var t identifier) $ do
+        len <- brackets integer
+        Var (Pointer_ t len)
+    -- Var t <$> identifier
 
 val :: Parser Value
 val = choice [ try $ D <$> float
              , I . fromInteger <$> integer
              , C <$> charLiteral
+             , do
+                 str <- stringLiteral
+                 pure . A $ C <$> str ++ "\0"
+             , A <$> braces (commaSep val)
              ]
 
 term :: Parser Expression
@@ -162,7 +180,6 @@ expr =  buildExpressionParser table term
     prefix name  = Prefix  (try (reservedOp name) $> prefixOp name)
     postfix name = Postfix (try (reservedOp name) $> prefixOp name)
 
-
 semiStatement :: Parser Statement
 semiStatement = choice
     [ reserved "return" >> Return <$> expr
@@ -189,24 +206,20 @@ statement = semiStatement <|> choice
             _         -> fail "ill-formed 'for' declaration"
     ]
 
-
 external :: Parser Statement
 external = do
     t  <- type_
     i  <- identifier
     vs <- parens (commaSep var)
-    lookAhead (option False (semi $> True)) >>= \case
+    option False (semi $> True) >>= \case
         True  -> pure $ FDeclaration t i vs
         False -> FDefinition t i vs <$> block
-
 
 block :: Parser Statement
 block = Block <$> (braces . many . lexeme) statement
 
-
 program :: Parser Statement
 program = whiteSpace >> Block <$> many (lexeme external)
-
 
 parseProgram :: String -> Either ParseError Statement
 parseProgram = parse program ""

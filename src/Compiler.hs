@@ -11,26 +11,30 @@
 
 module Compiler where
 
+import Parser
+import Utils
+
 import Control.Lens hiding (Empty)
 import Control.Monad.State
 import Control.Monad.Tardis
 import Control.Monad.Writer
-import Data.Char            ( ord )
+import Data.Char            ( ord, chr )
 import Data.Map             ( Map )
-import Parser
 import Text.Format
 import Text.Pretty.Simple   ( pPrint )
 
 import qualified Data.Map as M
-import Data.Maybe (isJust, fromJust, fromMaybe)
+import Data.Maybe (isJust, fromJust, fromMaybe, isNothing)
 
 type Offset = Int
 data VarsTable = VarsTable { _table     :: Map String (Offset, Type)
                            , _maxOffset :: Int
                            }
 
-data FwState = FwState { _vars   :: VarsTable
-                       , _indent :: Int
+data FwState = FwState { _vars    :: VarsTable
+                       , _funs    :: Map Identifier [Type]
+                       , _indent  :: Int
+                       , _globals :: Map Identifier Value
                        }
 
 data BwState = BwState { _totVarSize :: Int }
@@ -51,6 +55,8 @@ instance Empty VarsTable where
 
 instance Empty FwState where
   empty = FwState { _vars = empty
+                  , _funs = mempty
+                  , _globals = mempty
                   , _indent = 0
                   }
 
@@ -63,7 +69,7 @@ instance (MonadFix m) => MonadState s (TardisT bw s m) where
   put = sendFuture
 
 instance (MonadFix m) => MonadFail (TardisT bw fw m) where
-  fail = error "fail"
+  fail = error
 
 type ASM = TardisT BwState FwState (Writer String)
 
@@ -79,34 +85,39 @@ opTable = M.fromList [ ("+", "add")
                      , ("/", "idiv")
                      ]
 
-getValue :: Value -> String
-getValue (I x) = show x
-getValue (D x) = show x
-getValue (C x) = show x
+showValue :: Value -> String
+showValue (I x) = show x
+showValue (D x) = show x
+showValue (C x) = show x
 
-getMov :: Type -> (String, String)
-getMov Char_  = ("movb", "al")
-getMov Short_ = ("movw", "ax")
-getMov Int_   = ("movl", "eax")
-getMov Long_  = ("mov", "rax")
-
+sizeof :: Type -> Int
+sizeof Char_ = 8
+sizeof Short_ = 16
+sizeof Int_ = 32
+sizeof Long_ = 64
 
 evaluate :: Expression -> ASM ()
-evaluate (Constant c) = do
-    write $ "mov $" ++ getValue c ++ ", %rax"
+-- evaluate (Constant (S str)) = do
+--     lbl <- gets $ M.size . _globals
+--     let name = replicate 3 $ chr $ lbl + ord 'a'
+--     globals . at name ?= S str
+--     write $ format "mov {0}(%rip), %rax" [name]
+evaluate (Constant c) = write $ format "mov ${0}, %rax" [showValue c]
 
 evaluate (Variable name) = do
     use (vars . table . at name) >>= \case
         Nothing -> error $ "Usage of undefined variable \"" ++ name ++ "\""
-        Just (o, t) -> write $ format "{0} -{1}(%rbp), %{2}" [mov, show o, reg]
-          where (mov, reg) = getMov t
+        Just (o, t) -> write $ format "{0} -{1}(%rbp), %{2}"
+            [sizedInst "mov" size, show o, sizedReg "rax" size]
+          where size = sizeof t
 
 evaluate (Assignment (Variable name) e) = do
     evaluate e
     use (vars . table . at name) >>= \case
         Nothing -> error $ "Assignment to an undefined variable " ++ show name
-        Just (n, t)  -> write $ format "{0} %{1}, -{2}(%rbp)" [mov, reg, show n]
-          where (mov, reg) = getMov t
+        Just (n, t)  -> write $ format "{0} %{1}, -{2}(%rbp)"
+            [sizedInst "mov" size, sizedReg "rax" size, show n]
+          where size = sizeof t
 
 evaluate (Op op (Just lhs) (Just rhs)) = do
     evaluate lhs
@@ -132,19 +143,24 @@ evaluate (Op op (Just lhs) (Just rhs)) = do
         when (op == ">=") (write "setge %al")
         when (op == "<=") (write "setle %al")
 
-evaluate (Application f args) = do
-        passArgs ["rdi", "rsi", "rdx", "rcx", "r8", "r9"] args
-        write $ format "call {0}" [f]
+evaluate (Application name args) = do
+    use (funs . at name) >>= \case
+        Nothing -> fail $ "attempt to call an undeclared function " ++ show name
+        Just types -> do
+            passArgs ["rdi", "rsi", "rdx", "rcx", "r8", "r9"] (zip types args)
+            write $ format "call {0}" [name]
   where
-    passArgs :: [String] -> [Expression] -> ASM ()
+    passArgs :: [String] -> [(Type, Expression)] -> ASM ()
     passArgs _ [] = pure ()
-    passArgs [] (e:es) = do
+    passArgs [] ((t, e):es) = do
         evaluate e
         write "push %rax"
         passArgs [] es
-    passArgs (r:rs) (e:es) = do
+    passArgs (r:rs) ((t, e):es) = do
         evaluate e
-        write $ format "mov %rax, %{0}" [r]
+        let size = sizeof t
+        write $ format "{0} %{1}, %{2}"
+            [sizedInst "mov" size, sizedReg "rax" size, sizedReg r size]
         passArgs rs es
 
 
@@ -168,49 +184,58 @@ generate (Return e) = do
     write "pop %rbp"
     write "ret"
 
+generate (FDeclaration t name args) = do
+    use (funs . at name) >>= \case
+        Just _ -> fail $ "multiple declarations of function " ++ show name
+        Nothing -> funs . at name ?= map _t args
+
 generate (FDefinition t name args body) = do
-    -- generate <@> map (`Declaration` Nothing) args
+    record <- use $ funs . at name
+    when (isNothing record) (generate (FDeclaration t name args))
     write $ ".globl " ++ name
     write $ name ++ ":"
+
+    vs <- use vars
+    vars .= empty
     indent += 4
+
     write "push %rbp"
     write "mov %rsp, %rbp"
     totOffset <- getsFuture _totVarSize
     write $ format "sub ${0}, %rsp" [show totOffset]
     fillArgs ["rdi", "rsi", "rdx", "rcx", "r8", "r9"] args
     generate body
+
     indent -= 4
+    totSize <- use $ vars . maxOffset
+    modifyBackwards (totVarSize .~ totSize)
+    vars .= vs
   where
     fillArgs :: [String] -> [Var] -> ASM ()
     fillArgs _ [] = pure ()
     fillArgs (r:rs) (v:vs) = do
         generate (Declaration v Nothing)
         Just (o, t) <- use (vars . table . at (_name v))
-        -- let (mov, reg) = getMov t
-        write $ format "mov %{0}, -{1}(%rbp)" [r, show o]
+        let size = sizeof t
+        write $ format "{0} %{1}, -{2}(%rbp)" [sizedInst "mov" size, sizedReg r size, show o]
 
 generate (Declaration (Var t name) rhs) = do
     use (vars . table . at name) >>= \case
         Just _ -> error $ "Variable " ++ show name ++ " already declared."
         Nothing -> do
-            let o = sizeof t
+            let o = sizeof t `div` 8
             newOffset <- vars . maxOffset <+= o
             vars . table . at name ?= (newOffset, t)
     case rhs of
         Nothing -> pure ()
         Just e  -> evaluate $ Assignment (Variable name) e
-  where
-    sizeof Long_  = 8
-    sizeof Int_   = 4
-    sizeof Short_ = 2
-    sizeof Char_  = 1
 
 generate (Call e) = evaluate e
 
 generate (Block b) = do
+    -- vs <- use vars
     generate <@> b
-    totSize <- gets $ maximum . (0:) . map (fst . snd) . M.toList . _table . _vars
-    modifyBackwards (totVarSize .~ totSize)
+    -- vars .= vs -- forget local block variables
 
 generate (If cond ifBranch elseBranch) = do
     evaluate cond

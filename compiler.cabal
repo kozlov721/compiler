@@ -27,6 +27,7 @@ library
   exposed-modules:
       Compiler
       Parser
+      Utils
   other-modules:
       Paths_compiler
   hs-source-dirs:
