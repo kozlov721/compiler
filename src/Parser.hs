@@ -145,6 +145,7 @@ expr =  buildExpressionParser table term
     table = [ [ prefix "++"
               , prefix "--"
               , prefix "*"
+              , prefix "!"
               ]
             , [ postfix "++"
               , postfix "--"

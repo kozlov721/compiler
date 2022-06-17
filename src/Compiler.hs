@@ -100,58 +100,93 @@ saveResult :: Identifier -> ASM ()
 saveResult name = do
     use (vars . table . at name) >>= \case
         Nothing -> error $ "Assignment to an undefined variable " ++ show name
-        Just (n, size)  -> write $ format "{0} %{1}, -{2}(%rbp)"
+        Just (n, size)  -> fwrite "{0} %{1}, -{2}(%rbp)"
             [sizedInst "mov" size, sizedReg "rax" size, show n]
+
+withReg :: String -> ASM a -> ASM a
+withReg reg m = do
+    fwrite "push %{0}" [reg]
+    a <- m
+    fwrite "pop %{0}" [reg]
+    pure a
+
+fwrite :: String -> [String] -> ASM ()
+fwrite str = write . format str
 
 evaluate :: Expression -> ASM ()
 evaluate (Constant arr@(A _)) = do
     lbl <- gets $ M.size . _globals
     let name = format ".LC{0}" [show lbl]
     globals . at name ?= arr
-    write $ format "lea {0}(%rip), %rax" [name]
-evaluate (Constant c) = write $ format "mov ${0}, %rax" [showValue c]
+    fwrite "lea {0}(%rip), %rax" [name]
+evaluate (Constant c) = fwrite "mov ${0}, %rax" [showValue c]
 
 evaluate (Variable name) = do
     use (vars . table . at name) >>= \case
         Nothing -> error $ "Usage of undefined variable " ++ show name
-        Just (o, size) -> write $ format "{0} -{1}(%rbp), %{2}"
+        Just (o, size) -> fwrite "{0} -{1}(%rbp), %{2}"
             [sizedInst "mov" size, show o, sizedReg "rax" size]
 
 evaluate (Assignment (Variable name) e) = do
     evaluate e
     saveResult name
 
-evaluate (Op op (Just lhs) (Just rhs)) = do
-    write "push %rcx"
-    evaluate rhs
-    write "push %rax"
-    evaluate lhs
-    write "pop %rcx"
-    when (op `elem` ["==", "!=", ">=", "<=", ">", "<"]) $ do
-        write "cmp %rcx, %rax"
+evaluate (Op op (Just lhs) (Just rhs))
+    | op `elem` ["&&", "||"] = withReg "rcx" $ do
+        second <- newLabel
+        end <- newLabel
+
+        evaluate lhs
+        write "cmp $0, %rax"
         write "mov $0, %rax"
-        when (op == "==") (write "sete %al" )
-        when (op == "!=") (write "setne %al")
-        when (op == "<" ) (write "setl %al" )
-        when (op == ">" ) (write "setg %al" )
-        when (op == ">=") (write "setge %al")
-        when (op == "<=") (write "setle %al")
-    when (op == "+") (write "add %rcx, %rax")
-    when (op == "-") (write "sub %rcx, %rax")
-    when (op == "*") (write "imul %rcx")
-    when (op == "/" || op == "%") $ do
-        write "push %rdx"
-        write "mov $0, %rdx"
-        write "idiv %ecx"
-        when (op == "%") (write "mov %rdx, %rax")
-        write "pop %rdx"
-    write "pop %rcx"
+        when (op == "||") $ do
+            fwrite "je {0}" [second]
+            write "mov $1, %rax"
+            fwrite "jmp {0}" [end]
+        when (op == "&&") $ do
+            fwrite "jne {0}" [second]
+            write "mov $0, %rax"
+            fwrite "jmp {0}" [end]
+        label second
+        evaluate rhs
+        label end
+    | otherwise = withReg "rcx" $ do
+        evaluate rhs
+        write "push %rax"
+        evaluate lhs
+        write "pop %rcx"
+        when (op `elem` ["==", "!=", ">=", "<=", ">", "<"]) $ do
+            write "cmp %rcx, %rax"
+            write "mov $0, %rax"
+            when (op == "==") (write "sete %al" )
+            when (op == "!=") (write "setne %al")
+            when (op == "<" ) (write "setl %al" )
+            when (op == ">" ) (write "setg %al" )
+            when (op == ">=") (write "setge %al")
+            when (op == "<=") (write "setle %al")
+        when (op == "+") (write "add %rcx, %rax")
+        when (op == "-") (write "sub %rcx, %rax")
+        when (op == "|") (write "or %rcx, %rax")
+        when (op == "&") (write "and %rcx, %rax")
+        when (op == "^") (write "xor %rcx, %rax")
+        when (op == "*") (write "imul %rcx")
+        when (op == "/" || op == "%") $ withReg "rdx" $ do
+            write "mov $0, %rdx"
+            write "idiv %ecx"
+            when (op == "%") (write "mov %rdx, %rax")
 
 evaluate (Op op Nothing (Just x@(Variable name))) = do
     evaluate x
     when (op == "--") (write "dec %rax")
     when (op == "++") (write "inc %rax")
     saveResult name
+
+evaluate (Op op Nothing (Just e)) = do
+    evaluate e
+    when (op == "!") $ do
+        write "cmp $0, %rax"
+        write "mov $0, %rax"
+        write "sete %al"
 
 evaluate (Application name args) = do
     use (funs . at name) >>= \case
@@ -161,7 +196,7 @@ evaluate (Application name args) = do
                 ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
                 (zip (types ++ repeat VarArgs_) args)
             write "mov $0, %rax"
-            write $ format "call {0}" [name]
+            fwrite "call {0}" [name]
             write . format "pop %{0}" . (:[]) <@> usedRegs
   where
     passArgs :: [String] -> [(Type, Expression)] -> ASM [String]
@@ -173,8 +208,8 @@ evaluate (Application name args) = do
     passArgs (r:rs) ((t, e):es) = do
         evaluate e
         let size = sizeof t
-        write $ format "push %{0}" [r]
-        write $ format "{0} %{1}, %{2}"
+        fwrite "push %{0}" [r]
+        fwrite "{0} %{1}, %{2}"
             [sizedInst "mov" size, sizedReg "rax" size, sizedReg r size]
         (r:) <$> passArgs rs es
 
@@ -199,8 +234,7 @@ newLabel = do
 generate :: Statement -> ASM ()
 generate (Return e) = do
     evaluate e
-    write "mov %rbp, %rsp"
-    write "pop %rbp"
+    write "leave"
     write "ret"
 
 generate (FDeclaration t name args) = do
@@ -218,10 +252,11 @@ generate (FDefinition t name args body) = do
     vars .= empty
     indent += 4
 
-    write "push %rbp"
-    write "mov %rsp, %rbp"
     totOffset <- getsFuture _totVarSize
-    write $ format "sub ${0}, %rsp" [show totOffset]
+    -- note: `enter` is slow and obsolete, but I don't care here;
+    -- it's worht the few extra lines saved when in need to
+    -- debug the produced assembly
+    fwrite "enter ${0}, $0" [show totOffset]
     fillArgs ["rdi", "rsi", "rdx", "rcx", "r8", "r9"] args
     generate body
 
@@ -237,7 +272,7 @@ generate (FDefinition t name args body) = do
     fillArgs (r:rs) (v:vs) = do
         generate (Declaration v Nothing)
         Just (o, size) <- use (vars . table . at (_name v))
-        write $ format "{0} %{1}, -{2}(%rbp)" [sizedInst "mov" size, sizedReg r size, show o]
+        fwrite "{0} %{1}, -{2}(%rbp)" [sizedInst "mov" size, sizedReg r size, show o]
 
 generate (Declaration (Var t name) rhs) = do
     use (vars . table . at name) >>= \case
@@ -255,9 +290,9 @@ generate (If cond ifBranch elseBranch) = do
     write "cmpl $0, %eax"
     els <- newLabel
     end <- newLabel
-    write $ format "je {0}" [els]
+    fwrite "je {0}" [els]
     generate ifBranch
-    write $ format "jmp {0}" [end]
+    fwrite "jmp {0}" [end]
     label els
     generate <@> elseBranch
     label end
@@ -269,9 +304,9 @@ generate (While cond body) = do
     label begin
     evaluate cond
     write "cmpl $0, %eax"
-    write $ format "je {0}" [end]
+    fwrite "je {0}" [end]
     generate body
-    write $ format "jmp {0}" [begin]
+    fwrite "jmp {0}" [begin]
     label end
     loop .= (prevBegin, prevEnd)
 
@@ -285,7 +320,7 @@ generate (For ini c upd body@(Block b)) = do
 generate (Call e) = evaluate e
 generate (Block b) = generate <@> b
 generate (Label name) = label name
-generate (Goto name) = write $ format "jmp {0}" [name]
+generate (Goto name) = fwrite "jmp {0}" [name]
 generate Continue = use (loop . _1) >>= write . format "jmp {0}" . (:[])
 generate Break    = use (loop . _2) >>= write . format "jmp {0}" . (:[])
 
@@ -299,7 +334,7 @@ toAsm st = do
     writeGlob (name, value) = do
         write $ name ++ ":"
         indent += 4
-        write $ format ".string {0}" [showValue value]
+        fwrite ".string {0}" [showValue value]
         indent -= 4
 
 compile :: String -> String
