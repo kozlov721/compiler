@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 module Parser where
 
@@ -6,8 +6,6 @@ import Text.Parsec
 import Text.Parsec.Expr
 import Text.Parsec.Language
 import Text.Parsec.String
-
-import Text.Pretty.Simple ( pPrint )
 
 import Data.Char    ( isAlpha, toUpper )
 import Data.Functor ( ($>) )
@@ -31,7 +29,7 @@ data Value = I Integer
            | C Char
            | A [Value] deriving ( Show )
 
-data Var = Var { _t :: Type
+data Var = Var { _t    :: Type
                , _name :: Identifier
                } deriving ( Show )
 
@@ -211,7 +209,7 @@ statement = semiStatement <|> choice
         reserved "for"
         parens (semiSep (optionMaybe (try expr))) >>= \case
             [ini, cond, upd] -> For ini cond upd <$> block
-            _         -> fail "ill-formed 'for' declaration"
+            _                -> fail "ill-formed 'for' declaration"
     , Label <$> identifier <* colon
     ]
 

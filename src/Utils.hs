@@ -45,11 +45,11 @@ regs = M.fromList
 
 
 sizedReg :: String -> Int -> String
-sizedReg reg 64 = reg
+sizedReg reg 64   = reg
 sizedReg reg size = regs M.! reg M.! size
 
 sizedInst :: String -> Int -> String
-sizedInst inst 8 = inst ++ "b"
+sizedInst inst 8  = inst ++ "b"
 sizedInst inst 16 = inst ++ "w"
 sizedInst inst 32 = inst ++ "l"
 sizedInst inst 64 = inst ++ "q"

@@ -14,17 +14,20 @@ module Compiler ( compile ) where
 import Parser
 import Utils
 
-import Control.Lens hiding (snoc, Empty)
+import Control.Lens         hiding ( Empty, snoc )
 import Control.Monad.State
 import Control.Monad.Tardis
 import Control.Monad.Writer
-import Data.Char            ( ord, chr )
-import Data.Map             ( Map )
+
+import Data.Char       ( chr, ord )
+import Data.List.Extra ( snoc, unsnoc )
+import Data.Map        ( Map )
+import Data.Maybe      ( fromJust, fromMaybe, isJust, isNothing )
+
 import Text.Format
-import Text.Pretty.Simple   ( pPrint )
-import Data.List.Extra ( unsnoc, snoc )
+import Text.Pretty.Simple ( pPrint )
+
 import qualified Data.Map as M
-import Data.Maybe (isJust, fromJust, fromMaybe, isNothing)
 
 type Offset = Int
 type Size = Int
@@ -83,18 +86,19 @@ infixl 4 <@>
 f <@> m = mapM_ f m
 
 showValue :: Value -> String
-showValue (I x) = show x
-showValue (D x) = show x
-showValue (C x) = show x
+showValue (I x)             = show x
+showValue (D x)             = show x
+showValue (C x)             = show x
 showValue (A str@((C _):_)) = show $ map (\(C c) -> c) str
+showValue (A [])            = ""
 
 sizeof :: Type -> Int
-sizeof Char_ = 8
-sizeof Short_ = 16
-sizeof Int_ = 32
-sizeof Long_ = 64
+sizeof Char_          = 8
+sizeof Short_         = 16
+sizeof Int_           = 32
+sizeof Long_          = 64
 sizeof (Pointer_ _ _) = 64
-sizeof VarArgs_ = 64
+sizeof VarArgs_       = 64
 
 saveResult :: Identifier -> ASM ()
 saveResult name = do
@@ -239,7 +243,7 @@ generate (Return e) = do
 
 generate (FDeclaration t name args) = do
     use (funs . at name) >>= \case
-        Just _ -> fail $ "multiple declarations of function " ++ show name
+        Just _  -> fail $ "multiple declarations of function " ++ show name
         Nothing -> funs . at name ?= args
 
 generate (FDefinition t name args body) = do
@@ -276,7 +280,7 @@ generate (FDefinition t name args body) = do
 
 generate (Declaration (Var t name) rhs) = do
     use (vars . table . at name) >>= \case
-        Just _ -> error $ "Variable " ++ show name ++ " already declared."
+        Just _  -> error $ "Variable " ++ show name ++ " already declared."
         Nothing -> do
             let o = sizeof t `div` 8
             newOffset <- vars . maxOffset <+= o
@@ -315,7 +319,7 @@ generate (For ini c upd body@(Block b)) = do
     let cond = fromMaybe (Constant (I 1)) c
     generate $ While cond $ case upd of
         Just u -> Block (b `snoc` Call u)
-        _ -> body
+        _      -> body
 
 generate (Call e) = evaluate e
 generate (Block b) = generate <@> b
@@ -339,5 +343,5 @@ toAsm st = do
 
 compile :: String -> String
 compile str = case parseProgram str of
-    Left err -> error $ show err
+    Left err  -> error $ show err
     Right ast -> execWriter (evalTardisT (toAsm ast) (empty, empty))
