@@ -1,24 +1,20 @@
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE TemplateHaskell       #-}
 
 {-# OPTIONS_GHC -Wno-incomplete-patterns  #-}
-{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
-
-{-# HLINT ignore "Use newtype instead of data" #-}
-
 
 module Compiler ( compile ) where
 
 import Parser
+import Syntax
 import Utils
 
-import Control.Lens         hiding ( Empty, snoc )
 import Control.Monad.State
 import Control.Monad.Tardis
 import Control.Monad.Writer
 
+import Control.Lens    hiding ( Empty, snoc )
 import Data.Char       ( chr, ord )
 import Data.List.Extra ( snoc, unsnoc )
 import Data.Map        ( Map )
@@ -28,114 +24,51 @@ import Text.Format
 import Text.Pretty.Simple ( pPrint )
 
 import qualified Data.Map as M
+import Control.Applicative (liftA2)
 
-type Offset = Int
-type Size = Int
-data VarsTable = VarsTable { _table     :: Map String (Offset, Size)
-                           , _maxOffset :: Int
-                           }
+tryLift :: (Integer -> Integer -> Integer) -> Value -> Value -> Maybe Value
+tryLift f (I a) (I b) = Just $ I $ f a b
+tryLift f (C a) (I b) = Just $ I $ f (toInteger (fromEnum a)) b
+tryLift f (I a) (C b) = Just $ I $ f a (toInteger (fromEnum b))
+tryLift f (C a) (C b) = Just $ I $ f (toInteger  (fromEnum b)) (toInteger (fromEnum b))
+tryLift _ _ _ = Nothing
 
-data FwState = FwState { _vars    :: VarsTable
-                       , _funs    :: Map Identifier [Type]
-                       , _indent  :: Int
-                       , _globals :: Map Identifier Value
-                       , _nlabels :: Int
-                       , _loop    :: (String, String)
-                       }
-
-data BwState = BwState { _totVarSize :: Int }
-
-makeLenses ''FwState
-makeLenses ''BwState
-makeLenses ''VarsTable
-makePrisms ''Type
-makeLenses ''Var
-
-class Empty a where
-  empty :: a
-
-instance Empty VarsTable where
-  empty = VarsTable { _table = mempty
-                    , _maxOffset = 0
-                    }
-
-instance Empty FwState where
-  empty = FwState { _vars = empty
-                  , _funs = mempty
-                  , _globals = mempty
-                  , _indent = 0
-                  , _nlabels = 0
-                  , _loop = ("", "")
-                  }
-
-instance Empty BwState where
-  empty = BwState { _totVarSize = 0
-                  }
-
-instance (MonadFix m) => MonadState s (TardisT bw s m) where
-  get = getPast
-  put = sendFuture
-
-instance (MonadFix m) => MonadFail (TardisT bw fw m) where
-  fail = error
-
-type ASM = TardisT BwState FwState (Writer String)
-
-infixl 4 <@>
-(<@>) :: (Foldable t, Monad m) => (a -> m b) -> t a -> m ()
-f <@> m = mapM_ f m
-
-showValue :: Value -> String
-showValue (I x)             = show x
-showValue (D x)             = show x
-showValue (C x)             = show x
-showValue (A str@((C _):_)) = show $ map (\(C c) -> c) str
-showValue (A [])            = ""
-
-sizeof :: Type -> Int
-sizeof Char_          = 8
-sizeof Short_         = 16
-sizeof Int_           = 32
-sizeof Long_          = 64
-sizeof (Pointer_ _ _) = 64
-sizeof VarArgs_       = 64
-
-saveResult :: Identifier -> ASM ()
-saveResult name = do
-    use (vars . table . at name) >>= \case
-        Nothing -> error $ "Assignment to an undefined variable " ++ show name
-        Just (n, size)  -> fwrite "{0} %{1}, -{2}(%rbp)"
-            [sizedInst "mov" size, sizedReg "rax" size, show n]
-
-withReg :: String -> ASM a -> ASM a
-withReg reg m = do
-    fwrite "push %{0}" [reg]
-    a <- m
-    fwrite "pop %{0}" [reg]
-    pure a
-
-fwrite :: String -> [String] -> ASM ()
-fwrite str = write . format str
+simplify :: Expression -> Expression
+simplify e@(Op op (Just (Constant lhs)) (Just (Constant rhs))) =
+    case opTable op of
+        Just f -> maybe e Constant (tryLift f lhs rhs)
+        Nothing -> e
+simplify e@(Op op lhs rhs)
+    | lhs /= lhs' || rhs /= rhs' = simplify (Op op lhs' rhs')
+    | otherwise = e
+  where
+    lhs' = simplify <$> lhs
+    rhs' = simplify <$> rhs
+simplify (Assignment lhs rhs) = Assignment (simplify lhs) (simplify rhs)
+simplify e = e
 
 evaluate :: Expression -> ASM ()
-evaluate (Constant arr@(A _)) = do
+evaluate = evaluate' . simplify
+
+evaluate' :: Expression -> ASM ()
+evaluate' (Constant arr@(A _)) = do
     lbl <- gets $ M.size . _globals
     let name = format ".LC{0}" [show lbl]
     globals . at name ?= arr
     fwrite "lea {0}(%rip), %rax" [name]
-evaluate (Constant c) = fwrite "mov ${0}, %rax" [showValue c]
+evaluate' (Constant c) = fwrite "mov ${0}, %rax" [showValue c]
 
-evaluate (Variable name) = do
+evaluate' (Variable name) = do
     use (vars . table . at name) >>= \case
         Nothing -> error $ "Usage of undefined variable " ++ show name
         Just (o, size) -> fwrite "{0} -{1}(%rbp), %{2}"
-            [sizedInst "mov" size, show o, sizedReg "rax" size]
+            [sizedInst "mov" size, show o, sizedReg RAX size]
 
-evaluate (Assignment (Variable name) e) = do
+evaluate' (Assignment (Variable name) e) = do
     evaluate e
     saveResult name
 
-evaluate (Op op (Just lhs) (Just rhs))
+evaluate' (Op op (Just lhs) (Just rhs))
     | op `elem` ["&&", "||"] = withReg "rcx" $ do
         second <- newLabel
         end <- newLabel
@@ -143,14 +76,15 @@ evaluate (Op op (Just lhs) (Just rhs))
         evaluate lhs
         write "cmp $0, %rax"
         write "mov $0, %rax"
-        when (op == "||") $ do
-            fwrite "je {0}" [second]
-            write "mov $1, %rax"
-            fwrite "jmp {0}" [end]
-        when (op == "&&") $ do
-            fwrite "jne {0}" [second]
-            write "mov $0, %rax"
-            fwrite "jmp {0}" [end]
+        case op of
+            "||" -> do
+                fwrite "je {0}" [second]
+                write "mov $1, %rax"
+                fwrite "jmp {0}" [end]
+            "&&" -> do
+                fwrite "jne {0}" [second]
+                write "mov $0, %rax"
+                fwrite "jmp {0}" [end]
         label second
         evaluate rhs
         label end
@@ -162,78 +96,64 @@ evaluate (Op op (Just lhs) (Just rhs))
         when (op `elem` ["==", "!=", ">=", "<=", ">", "<"]) $ do
             write "cmp %rcx, %rax"
             write "mov $0, %rax"
-            when (op == "==") (write "sete %al" )
-            when (op == "!=") (write "setne %al")
-            when (op == "<" ) (write "setl %al" )
-            when (op == ">" ) (write "setg %al" )
-            when (op == ">=") (write "setge %al")
-            when (op == "<=") (write "setle %al")
-        when (op == "+") (write "add %rcx, %rax")
-        when (op == "-") (write "sub %rcx, %rax")
-        when (op == "|") (write "or %rcx, %rax")
-        when (op == "&") (write "and %rcx, %rax")
-        when (op == "^") (write "xor %rcx, %rax")
-        when (op == "*") (write "imul %rcx")
+            case op of
+                "==" -> write "sete %al"
+                "!=" -> write "setne %al"
+                "<"  -> write "setl %al"
+                ">"  -> write "setg %al"
+                ">=" -> write "setge %al"
+                "<=" -> write "setle %al"
+        case op of
+            "+" -> write "add %rcx, %rax"
+            "-" -> write "sub %rcx, %rax"
+            "|" -> write "or %rcx, %rax"
+            "&" -> write "and %rcx, %rax"
+            "^" -> write "xor %rcx, %rax"
+            "*" -> write "imul %rcx"
+            _   -> pure ()
         when (op == "/" || op == "%") $ withReg "rdx" $ do
             write "mov $0, %rdx"
             write "idiv %ecx"
             when (op == "%") (write "mov %rdx, %rax")
 
-evaluate (Op op Nothing (Just x@(Variable name))) = do
-    evaluate x
+evaluate' (Op op Nothing (Just x@(Variable name))) = do
+    evaluate' x
     when (op == "--") (write "dec %rax")
     when (op == "++") (write "inc %rax")
     saveResult name
 
-evaluate (Op op Nothing (Just e)) = do
-    evaluate e
+evaluate' (Op op Nothing (Just e)) = do
+    evaluate' e
     when (op == "!") $ do
         write "cmp $0, %rax"
         write "mov $0, %rax"
         write "sete %al"
 
-evaluate (Application name args) = do
+evaluate' (Application name args) = do
     use (funs . at name) >>= \case
-        Nothing -> fail $ "attempt to call an undeclared function " ++ show name
+        Nothing -> fail
+            $ "attempt to call an undeclared function " ++ show name
         Just types -> do
-            usedRegs <- passArgs
-                ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
+            usedRegs <- passArgs argRegs
                 (zip (types ++ repeat VarArgs_) args)
             write "mov $0, %rax"
             fwrite "call {0}" [name]
-            write . format "pop %{0}" . (:[]) <@> usedRegs
+            write . format "pop %{0}" . (:[]) <@> map showReg usedRegs
   where
-    passArgs :: [String] -> [(Type, Expression)] -> ASM [String]
+    passArgs :: [Register] -> [(Type, Expression)] -> ASM [Register]
     passArgs _ [] = pure []
     passArgs [] ((t, e):es) = do
         evaluate e
         write "push %rax"
         passArgs [] es
     passArgs (r:rs) ((t, e):es) = do
+        -- write $ "# " ++ show e
         evaluate e
         let size = sizeof t
-        fwrite "push %{0}" [r]
+        fwrite "push %{0}" [showReg r]
         fwrite "{0} %{1}, %{2}"
-            [sizedInst "mov" size, sizedReg "rax" size, sizedReg r size]
+            [sizedInst "mov" size, sizedReg RAX size, sizedReg r size]
         (r:) <$> passArgs rs es
-
-write :: String -> ASM ()
-write str = do
-    n <- getsPast _indent
-    lift $ tell $ str `indentBy` n ++ "\n"
-  where
-    indentBy str n = replicate n ' ' ++ str
-
-label :: String -> ASM ()
-label str = do
-    indent -= 2
-    write $ str ++ ":"
-    indent += 2
-
-newLabel :: ASM String
-newLabel = do
-    n <- nlabels <<+= 1
-    pure $ format ".L0{0}" [show n]
 
 generate :: Statement -> ASM ()
 generate (Return e) = do
@@ -261,7 +181,7 @@ generate (FDefinition t name args body) = do
     -- it's worht the few extra lines saved when in need to
     -- debug the produced assembly
     fwrite "enter ${0}, $0" [show totOffset]
-    fillArgs ["rdi", "rsi", "rdx", "rcx", "r8", "r9"] args
+    fillArgs argRegs args
     generate body
 
     totSize <- use $ vars . maxOffset
@@ -271,12 +191,13 @@ generate (FDefinition t name args body) = do
     indent -= 4
     write ""
   where
-    fillArgs :: [String] -> [Var] -> ASM ()
+    fillArgs :: [Register] -> [Var] -> ASM ()
     fillArgs _ [] = pure ()
     fillArgs (r:rs) (v:vs) = do
         generate (Declaration v Nothing)
         Just (o, size) <- use (vars . table . at (_name v))
-        fwrite "{0} %{1}, -{2}(%rbp)" [sizedInst "mov" size, sizedReg r size, show o]
+        fwrite "{0} %{1}, -{2}(%rbp)"
+            [sizedInst "mov" size, sizedReg r size, show o]
 
 generate (Declaration (Var t name) rhs) = do
     use (vars . table . at name) >>= \case

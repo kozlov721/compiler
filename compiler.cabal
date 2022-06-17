@@ -27,6 +27,7 @@ library
   exposed-modules:
       Compiler
       Parser
+      Syntax
       Utils
   other-modules:
       Paths_compiler

@@ -2,6 +2,8 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 module Parser where
 
+import Syntax
+
 import Text.Parsec
 import Text.Parsec.Expr
 import Text.Parsec.Language
@@ -12,48 +14,6 @@ import Data.Functor ( ($>) )
 import Data.Void    ( Void )
 
 import qualified Text.Parsec.Token as P
-
-
-type Identifier = String
-data Type = Int_
-          | Short_
-          | Char_
-          | Long_
-          | Pointer_ Type (Maybe Integer)
-          | VarArgs_
-          | Void_
-          deriving ( Show, Eq )
-
-data Value = I Integer
-           | D Double
-           | C Char
-           | A [Value] deriving ( Show )
-
-data Var = Var { _t    :: Type
-               , _name :: Identifier
-               } deriving ( Show )
-
-data Expression = Variable Identifier
-                | Op String (Maybe Expression) (Maybe Expression)
-                | Application Identifier [Expression]
-                | Assignment Expression Expression
-                | Constant Value
-                deriving ( Show )
-
-data Statement = If Expression Statement (Maybe Statement)
-               | While Expression Statement
-               | For (Maybe Expression) (Maybe Expression) (Maybe Expression) Statement
-               | Call Expression
-               | Return Expression
-               | Declaration Var (Maybe Expression)
-               | FDeclaration Type Identifier [Type]
-               | FDefinition Type Identifier [Var] Statement
-               | Goto Identifier
-               | Break
-               | Continue
-               | Label Identifier
-               | Block [Statement]
-               deriving ( Show )
 
 
 langDef = emptyDef { P.commentStart    = "/*"
