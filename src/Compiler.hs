@@ -2,12 +2,10 @@
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 
-{-# OPTIONS_GHC -Wno-incomplete-patterns  #-}
-
 module Compiler ( compile ) where
 
+import AST
 import Parser
-import Syntax
 import Utils
 
 import Control.Monad.State
@@ -23,72 +21,72 @@ import Data.Maybe      ( fromJust, fromMaybe, isJust, isNothing )
 import Text.Format
 import Text.Pretty.Simple ( pPrint )
 
-import qualified Data.Map as M
-import Control.Applicative (liftA2)
+import           Control.Applicative ( liftA2 )
+import qualified Data.Map            as M
 
-tryLift :: (Integer -> Integer -> Integer) -> Value -> Value -> Maybe Value
-tryLift f (I a) (I b) = Just $ I $ f a b
-tryLift f (C a) (I b) = Just $ I $ f (toInteger (fromEnum a)) b
-tryLift f (I a) (C b) = Just $ I $ f a (toInteger (fromEnum b))
-tryLift f (C a) (C b) = Just $ I $ f (toInteger  (fromEnum b)) (toInteger (fromEnum b))
-tryLift _ _ _ = Nothing
-
-simplify :: Expression -> Expression
-simplify e@(Op op (Just (Constant lhs)) (Just (Constant rhs))) =
-    case opTable op of
-        Just f -> maybe e Constant (tryLift f lhs rhs)
-        Nothing -> e
-simplify e@(Op op lhs rhs)
-    | lhs /= lhs' || rhs /= rhs' = simplify (Op op lhs' rhs')
-    | otherwise = e
-  where
-    lhs' = simplify <$> lhs
-    rhs' = simplify <$> rhs
-simplify (Assignment lhs rhs) = Assignment (simplify lhs) (simplify rhs)
-simplify e = e
 
 evaluate :: Expression -> ASM ()
 evaluate = evaluate' . simplify
 
 evaluate' :: Expression -> ASM ()
-evaluate' (Constant arr@(A _)) = do
+evaluate' (Constant str@(S _)) = do
     lbl <- gets $ M.size . _globals
     let name = format ".LC{0}" [show lbl]
-    globals . at name ?= arr
+    globals . at name ?= str
     fwrite "lea {0}(%rip), %rax" [name]
 evaluate' (Constant c) = fwrite "mov ${0}, %rax" [showValue c]
 
 evaluate' (Variable name) = do
-    use (vars . table . at name) >>= \case
-        Nothing -> error $ "Usage of undefined variable " ++ show name
-        Just (o, size) -> fwrite "{0} -{1}(%rbp), %{2}"
-            [sizedInst "mov" size, show o, sizedReg RAX size]
+    (o, t) <- getVar name
+    let size = sizeof t
+    fwrite "{0} -{1}(%rbp), %{2}"
+        [sizedInst "mov" size, show o, sizedReg RAX size]
 
 evaluate' (Assignment (Variable name) e) = do
     evaluate e
     saveResult name
 
-evaluate' (Op op (Just lhs) (Just rhs))
-    | op `elem` ["&&", "||"] = withReg "rcx" $ do
+evaluate' (Reference (Variable name)) = do
+    (o, t) <- getVar name
+    let size = sizeof t
+    fwrite "leaq -{0}(%rbp), %rax" [show o]
+
+evaluate' (Dereference (Variable name)) = do
+    size <- refToRax name
+    fwrite "{0} (%rax), %{1}" [sizedInst "mov" size, sizedReg RAX size]
+
+evaluate' (Dereference e) = findType e >>= \case
+        Nothing -> fail "invalid type argument of unary '*'"
+        Just t -> do
+            let size = sizeof t
+            evaluate e
+            fwrite "{0} (%rax), %{1}" [sizedInst "mov" size, sizedReg RAX size]
+
+evaluate' (Assignment d@(Dereference (Variable name)) e) = withReg RCX $ do
+    evaluate e
+    write "mov %rax, %rcx"
+    size <- refToRax name
+    fwrite "{0} %{1}, (%rax)" [sizedInst "mov" size, sizedReg RCX size]
+
+evaluate' (Binary op lhs rhs)
+    | op `elem` ["&&", "||"] = withReg RCX $ do
         second <- newLabel
         end <- newLabel
-
         evaluate lhs
         write "cmp $0, %rax"
         write "mov $0, %rax"
-        case op of
-            "||" -> do
-                fwrite "je {0}" [second]
-                write "mov $1, %rax"
-                fwrite "jmp {0}" [end]
-            "&&" -> do
-                fwrite "jne {0}" [second]
-                write "mov $0, %rax"
-                fwrite "jmp {0}" [end]
+        when (op == "||") $ do
+            fwrite "je {0}" [second]
+            write "mov $1, %rax"
+            fwrite "jmp {0}" [end]
+        when (op == "&&") $ do
+            fwrite "jne {0}" [second]
+            write "mov $0, %rax"
+            fwrite "jmp {0}" [end]
         label second
         evaluate rhs
         label end
-    | otherwise = withReg "rcx" $ do
+    | otherwise = withReg RCX $ do
         evaluate rhs
         write "push %rax"
         evaluate lhs
@@ -96,38 +94,36 @@ evaluate' (Op op (Just lhs) (Just rhs))
         when (op `elem` ["==", "!=", ">=", "<=", ">", "<"]) $ do
             write "cmp %rcx, %rax"
             write "mov $0, %rax"
-            case op of
-                "==" -> write "sete %al"
-                "!=" -> write "setne %al"
-                "<"  -> write "setl %al"
-                ">"  -> write "setg %al"
-                ">=" -> write "setge %al"
-                "<=" -> write "setle %al"
-        case op of
-            "+" -> write "add %rcx, %rax"
-            "-" -> write "sub %rcx, %rax"
-            "|" -> write "or %rcx, %rax"
-            "&" -> write "and %rcx, %rax"
-            "^" -> write "xor %rcx, %rax"
-            "*" -> write "imul %rcx"
-            _   -> pure ()
-        when (op == "/" || op == "%") $ withReg "rdx" $ do
+            when (op == "==") (write "sete %al")
+            when (op == "!=") (write "setne %al")
+            when (op == "<") (write "setl %al")
+            when (op == ">") (write "setg %al")
+            when (op == ">=") (write "setge %al")
+            when (op == "<=") (write "setle %al")
+        when (op == "+") (write "add %rcx, %rax")
+        when (op == "-") (write "sub %rcx, %rax")
+        when (op == "|") (write "or %rcx, %rax")
+        when (op == "&") (write "and %rcx, %rax")
+        when (op == "^") (write "xor %rcx, %rax")
+        when (op == "*") (write "imul %rcx")
+        when (op == "/" || op == "%") $ withReg RDX $ do
             write "mov $0, %rdx"
             write "idiv %ecx"
             when (op == "%") (write "mov %rdx, %rax")
 
-evaluate' (Op op Nothing (Just x@(Variable name))) = do
+evaluate' (Prefix op x@(Variable name)) = do
     evaluate' x
     when (op == "--") (write "dec %rax")
     when (op == "++") (write "inc %rax")
     saveResult name
 
-evaluate' (Op op Nothing (Just e)) = do
+evaluate' (Prefix op e) = do
     evaluate' e
     when (op == "!") $ do
         write "cmp $0, %rax"
         write "mov $0, %rax"
         write "sete %al"
+    when (op == "~") (write "not %rax")
 
 evaluate' (Application name args) = do
     use (funs . at name) >>= \case
@@ -147,13 +143,13 @@ evaluate' (Application name args) = do
         write "push %rax"
         passArgs [] es
     passArgs (r:rs) ((t, e):es) = do
-        -- write $ "# " ++ show e
         evaluate e
         let size = sizeof t
         fwrite "push %{0}" [showReg r]
         fwrite "{0} %{1}, %{2}"
             [sizedInst "mov" size, sizedReg RAX size, sizedReg r size]
         (r:) <$> passArgs rs es
+evaluate' x = fail $ show x
 
 generate :: Statement -> ASM ()
 generate (Return e) = do
@@ -192,10 +188,13 @@ generate (FDefinition t name args body) = do
     write ""
   where
     fillArgs :: [Register] -> [Var] -> ASM ()
+    fillArgs [] (v:vs) = fail
+        "More than five arguments not currently supported"
     fillArgs _ [] = pure ()
     fillArgs (r:rs) (v:vs) = do
         generate (Declaration v Nothing)
-        Just (o, size) <- use (vars . table . at (_name v))
+        Just (o, t) <- use (vars . table . at (_name v))
+        let size = sizeof t
         fwrite "{0} %{1}, -{2}(%rbp)"
             [sizedInst "mov" size, sizedReg r size, show o]
 
@@ -203,9 +202,9 @@ generate (Declaration (Var t name) rhs) = do
     use (vars . table . at name) >>= \case
         Just _  -> error $ "Variable " ++ show name ++ " already declared."
         Nothing -> do
-            let o = sizeof t `div` 8
+            let o = sizeToBytes $ sizeof t
             newOffset <- vars . maxOffset <+= o
-            vars . table . at name ?= (newOffset, sizeof t)
+            vars . table . at name ?= (newOffset, t)
     case rhs of
         Nothing -> pure ()
         Just e  -> evaluate $ Assignment (Variable name) e
@@ -248,6 +247,7 @@ generate (Label name) = label name
 generate (Goto name) = fwrite "jmp {0}" [name]
 generate Continue = use (loop . _1) >>= write . format "jmp {0}" . (:[])
 generate Break    = use (loop . _2) >>= write . format "jmp {0}" . (:[])
+generate x =  fail $ show x
 
 toAsm :: Statement -> ASM ()
 toAsm st = do

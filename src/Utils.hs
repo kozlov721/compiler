@@ -1,16 +1,14 @@
-{-# LANGUAGE OverloadedLists       #-}
-{-# OPTIONS_GHC -Wno-incomplete-patterns #-}
-{-# LANGUAGE LambdaCase            #-}
-{-# LANGUAGE TemplateHaskell       #-}
-{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
-{-# HLINT ignore "Use newtype instead of data" #-}
 {-# LANGUAGE FlexibleInstances     #-}
+{-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedLists       #-}
+{-# LANGUAGE PatternSynonyms       #-}
+{-# LANGUAGE TemplateHaskell       #-}
 
 module Utils where
 
 
-import Syntax
+import AST
 
 import Control.Lens
 import Control.Monad.State
@@ -24,12 +22,14 @@ import qualified Data.Map as M
 
 
 data Register = RAX | RBX | RCX | RDX | RSI | RDI | RSP | RBP
-              | R8 | R9 | R10 | R11 | R12 | R13 | R14 | R15
+              | R8  | R9  | R10 | R11 | R12 | R13 | R14 | R15
               deriving ( Show, Read, Eq, Ord )
 
 type Offset = Int
-type Size = Int
-data VarsTable = VarsTable { _table     :: Map String (Offset, Size)
+data Size = B | W | L | Q deriving ( Show, Eq, Ord )
+type VarRecord = (Offset, Type)
+
+data VarsTable = VarsTable { _table     :: Map String VarRecord
                            , _maxOffset :: Int
                            }
 
@@ -41,7 +41,7 @@ data FwState = FwState { _vars    :: VarsTable
                        , _loop    :: (String, String)
                        }
 
-data BwState = BwState { _totVarSize :: Int }
+newtype BwState = BwState { _totVarSize :: Int }
 
 argRegs :: [Register]
 argRegs = [RDI, RSI, RDX, RCX, R8, R9]
@@ -49,8 +49,6 @@ argRegs = [RDI, RSI, RDX, RCX, R8, R9]
 makeLenses ''FwState
 makeLenses ''BwState
 makeLenses ''VarsTable
-makePrisms ''Type
-makeLenses ''Var
 
 class Empty a where
   empty :: a
@@ -82,40 +80,74 @@ instance (MonadFix m) => MonadFail (TardisT bw fw m) where
 
 type ASM = TardisT BwState FwState (Writer String)
 
+
+pattern Dereference e = Op "*" Nothing (Just e)
+pattern Reference e   = Op "&" Nothing (Just e)
+pattern Binary op l r = Op op (Just l) (Just r)
+pattern Prefix op e   = Op op Nothing (Just e)
+pattern Postfix op e  = Op op (Just e) Nothing
+
+getVar :: Identifier -> ASM VarRecord
+getVar name = use (vars . table . at name) >>= \case
+    Nothing -> fail $ "usage of undeclared varialbe " ++ show name
+    Just x  -> pure x
+
+tryLift :: (Integer -> Integer -> Integer) -> Value -> Value -> Maybe Value
+tryLift f (I a) (I b) = Just $ I $ f a b
+tryLift f (C a) (I b) = Just $ I $ f (toInteger (fromEnum a)) b
+tryLift f (I a) (C b) = Just $ I $ f a (toInteger (fromEnum b))
+tryLift f (C a) (C b) = Just $ I
+    $ f (toInteger  (fromEnum b)) (toInteger (fromEnum b))
+tryLift _ _ _ = Nothing
+
+simplify :: Expression -> Expression
+simplify e@(Op op (Just (Constant lhs)) (Just (Constant rhs))) =
+    case opTable op of
+        Just f  -> maybe e Constant (tryLift f lhs rhs)
+        Nothing -> e
+simplify e@(Op op lhs rhs)
+    | lhs /= lhs' || rhs /= rhs' = simplify (Op op lhs' rhs')
+    | otherwise = e
+  where
+    lhs' = simplify <$> lhs
+    rhs' = simplify <$> rhs
+simplify (Assignment lhs rhs) = Assignment (simplify lhs) (simplify rhs)
+simplify e = e
+
 showReg :: Register -> String
 showReg = lower . show
 
-regs :: Map Register (Map Int String)
+regs :: Map Register (Map Size String)
 regs = M.fromList
-    $ [ (RAX, [ (32, "eax")
-              , (16, "ax")
-              , (8, "al")])
-      , (RBX, [ (32, "ebx")
-              , (16, "bx")
-              , (8, "bl")])
-      , (RCX, [ (32, "ecx")
-              , (16, "cx")
-              , (8, "cl")])
-      , (RDX, [ (32, "edx")
-              , (16, "dx")
-              , (8, "dl")])
-      , (RSI, [ (32, "esi")
-              , (16, "si")
-              , (8, "sil")])
-      , (RDI, [ (32, "edi")
-              , (16, "di")
-              , (8, "dil")])
-      , (RSP, [ (32, "esp")
-              , (16, "sp")
-              , (8, "spl")])
-      , (RBP, [ (32, "ebp")
-              , (16, "bp")
-              , (8, "bpl")])
+    $ [ (RAX, [ (L, "eax")
+              , (W, "ax")
+              , (B, "al")])
+      , (RBX, [ (L, "ebx")
+              , (W, "bx")
+              , (B, "bl")])
+      , (RCX, [ (L, "ecx")
+              , (W, "cx")
+              , (B, "cl")])
+      , (RDX, [ (L, "edx")
+              , (W, "dx")
+              , (B, "dl")])
+      , (RSI, [ (L, "esi")
+              , (W, "si")
+              , (B, "sil")])
+      , (RDI, [ (L, "edi")
+              , (W, "di")
+              , (B, "dil")])
+      , (RSP, [ (L, "esp")
+              , (W, "sp")
+              , (B, "spl")])
+      , (RBP, [ (L, "ebp")
+              , (W, "bp")
+              , (B, "bpl")])
       ] ++
       [ let reg = "r" ++ show n in
-        (read (upper reg), [ (32, reg ++ "d")
-              , (16, reg ++ "w")
-              , (8, reg ++ "b")
+        (read (upper reg), [ (L, reg ++ "d")
+              , (W, reg ++ "w")
+              , (B, reg ++ "b")
               ])
       | n <- [8..15]
       ]
@@ -126,47 +158,67 @@ opTable "-" = Just (-)
 opTable "*" = Just (*)
 opTable _   = Nothing
 
-sizedReg :: Register -> Int -> String
-sizedReg reg 64   = showReg reg
+sizedReg :: Register -> Size -> String
+sizedReg reg Q   = showReg reg
 sizedReg reg size = regs M.! reg M.! size
 
-sizedInst :: String -> Int -> String
-sizedInst inst 8  = inst ++ "b"
-sizedInst inst 16 = inst ++ "w"
-sizedInst inst 32 = inst ++ "l"
-sizedInst inst 64 = inst ++ "q"
+sizedInst :: String -> Size -> String
+sizedInst inst s = inst ++ lower (show s)
 
 infixl 4 <@>
 (<@>) :: (Foldable t, Monad m) => (a -> m b) -> t a -> m ()
 f <@> m = mapM_ f m
 
 showValue :: Value -> String
-showValue (I x)             = show x
-showValue (D x)             = show x
-showValue (C x)             = show x
-showValue (A str@((C _):_)) = show $ map (\(C c) -> c) str
-showValue (A [])            = ""
+showValue (I x) = show x
+showValue (D x) = show x
+showValue (C x) = show x
+showValue (S x) = show x
+showValue (A x) = error "ararys not yet supported"
 
-sizeof :: Type -> Int
-sizeof Char_          = 8
-sizeof Short_         = 16
-sizeof Int_           = 32
-sizeof Long_          = 64
-sizeof (Pointer_ _ _) = 64
-sizeof VarArgs_       = 64
+sizeToBytes :: Size -> Int
+sizeToBytes B = 1
+sizeToBytes W = 2
+sizeToBytes L = 4
+sizeToBytes Q = 8
+
+sizeof :: Type -> Size
+sizeof Char_          = B
+sizeof Short_         = W
+sizeof Int_           = L
+sizeof Long_          = Q
+sizeof (Pointer_ _ _) = Q
+sizeof VarArgs_       = Q
+sizeof x = error $ "so far udefined sizeof for " ++ show (show x)
+
+findType :: Expression -> ASM (Maybe Type)
+findType (Variable name) = Just . snd <$> getVar name
+findType (Binary _ lhs rhs) = findType lhs >>= \case
+    Just t -> pure $ Just t
+    Nothing -> findType rhs
+findType _ = pure Nothing
+
+refToRax :: Identifier -> ASM Size
+refToRax name = do
+    getVar name >>= \case
+        (o, Pointer_ t _) -> do
+            fwrite "movq -{0}(%rbp), %rax" [show o]
+            pure $ sizeof t
+        _ -> fail "invalid type argument of unary '*'"
 
 saveResult :: Identifier -> ASM ()
 saveResult name = do
     use (vars . table . at name) >>= \case
         Nothing -> error $ "Assignment to an undefined variable " ++ show name
-        Just (n, size)  -> fwrite "{0} %{1}, -{2}(%rbp)"
+        Just (n, t)  -> fwrite "{0} %{1}, -{2}(%rbp)"
             [sizedInst "mov" size, sizedReg RAX size, show n]
+          where size = sizeof t
 
-withReg :: String -> ASM a -> ASM a
+withReg :: Register -> ASM a -> ASM a
 withReg reg m = do
-    fwrite "push %{0}" [reg]
+    fwrite "push %{0}" [showReg reg]
     a <- m
-    fwrite "pop %{0}" [reg]
+    fwrite "pop %{0}" [showReg reg]
     pure a
 
 write :: String -> ASM ()

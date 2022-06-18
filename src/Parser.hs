@@ -2,12 +2,14 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 module Parser where
 
-import Syntax
+import AST
 
 import Text.Parsec
 import Text.Parsec.Expr
 import Text.Parsec.Language
 import Text.Parsec.String
+
+import Text.Pretty.Simple ( pPrint )
 
 import Data.Char    ( isAlpha, toUpper )
 import Data.Functor ( ($>) )
@@ -16,22 +18,23 @@ import Data.Void    ( Void )
 import qualified Text.Parsec.Token as P
 
 
-langDef = emptyDef { P.commentStart    = "/*"
-                   , P.commentEnd      = "*/"
-                   , P.commentLine     = "//"
-                   , P.reservedNames   = [ "return" , "if" , "else" , "while"
-                                         , "for" , "void" , "char" , "int"
-                                         , "double" , "break" , "continue"
-                                         , "goto" , "sizeof", "long", "short"
-                                         ]
-                   , P.reservedOpNames =
-                         let simple = [ "+" , "-" , "*" , "/"
-                                      , ">>" , "<<" , "&" , "|" , "^"
-                                      ]
-                         in simple ++ [ "--" , "++" , "==" , "!=", "||" , "&&"
-                                      , ">"  , "<" , "<=" , ">=" , "~" , "!"
-                                      ] ++ map ("="++) simple
-                   }
+langDef = emptyDef
+    { P.commentStart    = "/*"
+    , P.commentEnd      = "*/"
+    , P.commentLine     = "//"
+    , P.reservedNames   = [ "return" , "if" , "else" , "while"
+                          , "for" , "void" , "char" , "int"
+                          , "double" , "break" , "continue"
+                          , "goto" , "sizeof", "long", "short"
+                          ]
+    , P.reservedOpNames =
+          let simple = [ "+" , "-" , "*" , "/"
+                       , ">>" , "<<" , "&" , "|" , "^"
+                       ]
+          in simple ++ [ "--" , "++" , "==" , "!=", "||" , "&&"
+                       , ">"  , "<" , "<=" , ">=" , "~" , "!"
+                       ] ++ map ("="++) simple
+    }
 
 lexer = P.makeTokenParser langDef
 
@@ -80,9 +83,7 @@ val :: Parser Value
 val = choice [ try $ D <$> float
              , I . fromInteger <$> integer
              , C <$> charLiteral
-             , do
-                 str <- stringLiteral
-                 pure . A $ C <$> str
+             , S <$> stringLiteral
              , A <$> braces (commaSep val)
              ]
 
@@ -104,6 +105,8 @@ expr =  buildExpressionParser table term
               , prefix "--"
               , prefix "*"
               , prefix "!"
+              , prefix "~"
+              , prefix "&"
               ]
             , [ postfix "++"
               , postfix "--"
@@ -132,13 +135,13 @@ expr =  buildExpressionParser table term
               | op <- [ "+=", "-=", "*=", "/=", "%="
                       , "&=", "|=", "^=", ">>=", "<<=" ]
               ]
-            , [ assign "=" AssocNone ]
+            , [ assign AssocNone ]
             ]
-    infixOp op l r  = Op op (Just l) (Just r)
-    prefixOp op r   = Op op Nothing (Just r)
-    postfixOp op l  = Op op (Just l) Nothing
-    assign name     = Infix   $ try (reservedOp name) $> Assignment
-    assignMod name  = Infix   $ do
+    infixOp op l r = Op op (Just l) (Just r)
+    prefixOp op  r = Op op Nothing (Just r)
+    postfixOp op l = Op op (Just l) Nothing
+    assign         = Infix $ try (reservedOp "=") $> Assignment
+    assignMod name = Infix $ do
         try $ reservedOp name
         let op = init name
         pure $ \lhs rhs -> Assignment lhs $ Op op (Just lhs) (Just rhs)
