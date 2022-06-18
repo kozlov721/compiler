@@ -139,9 +139,11 @@ evaluate' (Application name args) = do
     passArgs :: [Register] -> [(Type, Expression)] -> ASM [Register]
     passArgs _ [] = pure []
     passArgs [] ((t, e):es) = do
+        -- last argument must be pushed first
+        reg <- passArgs [] es
         evaluate e
         write "push %rax"
-        passArgs [] es
+        pure reg
     passArgs (r:rs) ((t, e):es) = do
         evaluate e
         let size = sizeof t
