@@ -22,17 +22,15 @@ import Text.Format
 import qualified Data.Map as M
 
 
+type Offset = Int
+type VarRecord = (Offset, Type)
+type VarsTable = Map String VarRecord
+
 data Register = RAX | RBX | RCX | RDX | RSI | RDI | RSP | RBP
               | R8  | R9  | R10 | R11 | R12 | R13 | R14 | R15
               deriving ( Show, Read, Eq, Ord )
 
-type Offset = Int
 data Size = B | W | L | Q deriving ( Show, Eq, Ord )
-type VarRecord = (Offset, Type)
-
-type VarsTable = Map String VarRecord
--- data VarsTable = VarsTable { _table     :: Map String VarRecord
---                            } deriving ( Show )
 
 data FwState = FwState { _vars    :: VarsTable
                        , _funs    :: Map Identifier [Type]
@@ -49,15 +47,9 @@ argRegs = [RDI, RSI, RDX, RCX, R8, R9]
 
 makeLenses ''FwState
 makeLenses ''BwState
--- makeLenses ''VarsTable
 
 class Empty a where
   empty :: a
-
--- instance Empty VarsTable where
---   empty = VarsTable { _table = mempty
---                     , _maxOffset = 0
---                     }
 
 instance Empty FwState where
   empty = FwState { _vars = mempty
@@ -88,6 +80,7 @@ pattern Binary op l r = Op op (Just l) (Just r)
 pattern Prefix op e   = Op op Nothing (Just e)
 pattern Postfix op e  = Op op (Just e) Nothing
 
+
 checkUndeclared :: Identifier -> ASM ()
 checkUndeclared name = use (vars . at name) >>= \case
     Just _  -> fail $ "Variable " ++ show name ++ " already declared."
@@ -105,17 +98,17 @@ getVar name = use (vars . at name) >>= \case
     Nothing -> fail $ "usage of undeclared varialbe " ++ show name
     Just x  -> pure x
 
-tryLift :: (Int -> Int -> Int) -> Value -> Value -> Maybe Value
-tryLift f (I a) (I b) = Just $ I $ f a b
-tryLift f (C a) (I b) = Just $ I $ f (fromEnum a) b
-tryLift f (I a) (C b) = Just $ I $ f a (fromEnum b)
-tryLift f (C a) (C b) = Just $ I $ f (fromEnum b) (fromEnum b)
-tryLift _ _ _         = Nothing
+tryLiftV :: (Int -> Int -> Int) -> Value -> Value -> Maybe Value
+tryLiftV f (I a) (I b) = Just $ I $ f a b
+tryLiftV f (C a) (I b) = Just $ I $ f (fromEnum a) b
+tryLiftV f (I a) (C b) = Just $ I $ f a (fromEnum b)
+tryLiftV f (C a) (C b) = Just $ I $ f (fromEnum b) (fromEnum b)
+tryLiftV _ _ _         = Nothing
 
 simplify :: Expression -> Expression
 simplify e@(Op op (Just (Constant lhs)) (Just (Constant rhs))) =
     case opTable op of
-        Just f  -> maybe e Constant (tryLift f lhs rhs)
+        Just f  -> maybe e Constant (tryLiftV f lhs rhs)
         Nothing -> e
 simplify e@(Op op lhs rhs)
     | lhs /= lhs' || rhs /= rhs' = simplify (Op op lhs' rhs')
@@ -129,40 +122,6 @@ simplify e = e
 showReg :: Register -> String
 showReg = lower . show
 
-regs :: Map Register (Map Size String)
-regs = M.fromList
-    $ [ (RAX, [ (L, "eax")
-              , (W, "ax")
-              , (B, "al")])
-      , (RBX, [ (L, "ebx")
-              , (W, "bx")
-              , (B, "bl")])
-      , (RCX, [ (L, "ecx")
-              , (W, "cx")
-              , (B, "cl")])
-      , (RDX, [ (L, "edx")
-              , (W, "dx")
-              , (B, "dl")])
-      , (RSI, [ (L, "esi")
-              , (W, "si")
-              , (B, "sil")])
-      , (RDI, [ (L, "edi")
-              , (W, "di")
-              , (B, "dil")])
-      , (RSP, [ (L, "esp")
-              , (W, "sp")
-              , (B, "spl")])
-      , (RBP, [ (L, "ebp")
-              , (W, "bp")
-              , (B, "bpl")])
-      ] ++
-      [ let reg = "r" ++ show n in
-        (read (upper reg), [ (L, reg ++ "d")
-              , (W, reg ++ "w")
-              , (B, reg ++ "b")
-              ])
-      | n <- [8..15]
-      ]
 
 opTable :: Num a => String -> Maybe (a -> a -> a)
 opTable "+" = Just (+)
@@ -173,6 +132,24 @@ opTable _   = Nothing
 sizedReg :: Register -> Size -> String
 sizedReg reg Q    = showReg reg
 sizedReg reg size = regs M.! reg M.! size
+  where
+    regs = M.fromList
+        $ [ (RAX, [(L, "eax"), (W, "ax"), (B, "al" )])
+          , (RBX, [(L, "ebx"), (W, "bx"), (B, "bl" )])
+          , (RCX, [(L, "ecx"), (W, "cx"), (B, "cl" )])
+          , (RDX, [(L, "edx"), (W, "dx"), (B, "dl" )])
+          , (RSI, [(L, "esi"), (W, "si"), (B, "sil")])
+          , (RDI, [(L, "edi"), (W, "di"), (B, "dil")])
+          , (RSP, [(L, "esp"), (W, "sp"), (B, "spl")])
+          , (RBP, [(L, "ebp"), (W, "bp"), (B, "bpl")])
+          ] ++
+          [ let reg = "r" ++ show n in
+            (read (upper reg), [ (L, reg ++ "d")
+                               , (W, reg ++ "w")
+                               , (B, reg ++ "b")
+                               ])
+          | n <- [8..15]
+          ]
 
 sizedInst :: String -> Size -> String
 sizedInst inst s = inst ++ lower (show s)

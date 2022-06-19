@@ -214,8 +214,6 @@ generate (FDefinition t name args body) = do
     fillArgs argRegs args
     generate body
 
-    -- totSize <- use $ vars . maxOffset
-    -- modifyBackwards (totVarSize .~ totSize)
     vars .= vs
     when (t == Void_) $ generate $ Return $ Constant $ I 0
     indent -= 4
