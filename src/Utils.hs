@@ -34,6 +34,7 @@ data Size = B | W | L | Q deriving ( Show, Eq, Ord )
 
 data FwState = FwState { _vars    :: VarsTable
                        , _funs    :: Map Identifier [Type]
+                       , _structs :: Map Identifier [Var]
                        , _indent  :: Int
                        , _globals :: Map Identifier Value
                        , _nlabels :: Int
@@ -54,6 +55,7 @@ class Empty a where
 instance Empty FwState where
   empty = FwState { _vars = mempty
                   , _funs = mempty
+                  , _structs = mempty
                   , _globals = mempty
                   , _indent = 0
                   , _nlabels = 0
@@ -121,7 +123,6 @@ simplify e = e
 showReg :: Register -> String
 showReg = lower . show
 
-
 opTable :: Num a => String -> Maybe (a -> a -> a)
 opTable "+" = Just (+)
 opTable "-" = Just (-)
@@ -162,7 +163,6 @@ showValue (I x) = show x
 showValue (D x) = show x
 showValue (C x) = show x
 showValue (S x) = show x
-showValue (A x) = error "ararys not yet supported"
 
 sizeToBytes :: Size -> Int
 sizeToBytes B = 1

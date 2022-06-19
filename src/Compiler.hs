@@ -3,7 +3,7 @@
 module Compiler ( compile ) where
 
 import AST
-import Parser
+import Parser ( parseProgram )
 import Utils
 
 import Control.Monad.State
@@ -22,6 +22,15 @@ import Text.Pretty.Simple ( pPrint )
 import           Control.Applicative ( liftA2 )
 import qualified Data.Map            as M
 
+saveArr :: [(Type, Expression)] -> Offset -> ASM ()
+saveArr [] _ = pure ()
+saveArr ((t, x):xs) o = do
+    let size = sizeof t
+    let bSize = sizeToBytes size
+    evaluate x
+    fwrite "{0} %{1}, -{2}(%rbp)"
+        [sizedInst "mov" size, sizedReg RAX size, show o]
+    saveArr xs (o - bSize)
 
 evaluate :: Expression -> ASM ()
 evaluate = evaluate' . simplify
@@ -60,23 +69,15 @@ evaluate' (Assignment (Index name i) e) = withReg RCX $ do
     write "pop %rcx"
     fwrite "{0} %{1}, (%rcx)" [sizedInst "mov" size, sizedReg RAX size]
 
-evaluate' (Assignment (Variable name) (Constant (A arr))) = do
+evaluate' (Assignment (Variable name) (InitArr arr)) = do
     (o, Array_ t s) <- getVar name
     case s of
         Just size -> do
             let len = length arr
             when (len > size) (fail "excess elements in array initializer")
-            saveArr (arr ++ replicate (size - len) (last arr)) (sizeof t) o
-        Nothing -> saveArr arr (sizeof t) o
-  where
-    saveArr :: [Value] -> Size -> Offset -> ASM ()
-    saveArr [] _ _ = pure ()
-    saveArr (x:xs) size o = do
-        let bSize = sizeToBytes size
-        evaluate (Constant x)
-        fwrite "{0} %{1}, -{2}(%rbp)"
-            [sizedInst "mov" size, sizedReg RAX size, show o]
-        saveArr xs size (o - bSize)
+            let paddedArr = arr ++ replicate (size - len) (last arr)
+            saveArr (zip (repeat t) paddedArr) o
+        Nothing -> saveArr (zip (repeat t) arr)  o
 
 evaluate' (Assignment (Variable name) e) = do
     evaluate e
@@ -247,7 +248,7 @@ generate (FDefinition t name args body) = do
 generate (Declaration (Var arrT@(Array_ itemT size) name) rhs) = do
     checkUndeclared name
     case rhs of
-        Just rhs@(Constant (A arr)) -> do
+        Just rhs@(InitArr arr) -> do
             let s = fromMaybe (length arr) size
             let o = s * sizeToBytes (sizeof itemT)
             saveVar arrT name o
@@ -267,6 +268,11 @@ generate (Declaration (Var t name) rhs) = do
     case rhs of
         Nothing -> pure ()
         Just e  -> evaluate $ Assignment (Variable name) e
+
+generate (Struct name fields) = do
+    use (structs . at name) >>= \case
+        Just _  -> fail $ "multiple declarations of struct " ++ show name
+        Nothing -> structs . at name ?= fields
 
 generate (If cond ifBranch elseBranch) = do
     evaluate cond

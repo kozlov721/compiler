@@ -25,14 +25,14 @@ langDef = emptyDef
     , P.reservedNames   = [ "return" , "if" , "else" , "while"
                           , "for" , "void" , "char" , "int"
                           , "double", "float" , "break" , "continue"
-                          , "goto" , "sizeof", "long", "short"
+                          , "goto" , "sizeof", "long", "short", "struct"
                           ]
     , P.reservedOpNames =
           let simple = [ "+" , "-" , "*" , "/"
                        , ">>" , "<<" , "&" , "|" , "^"
                        ]
           in simple ++ [ "--" , "++" , "==" , "!=", "||" , "&&"
-                       , ">"  , "<" , "<=" , ">=" , "~" , "!"
+                       , ">"  , "<" , "<=" , ">=" , "~" , "!", "->"
                        ] ++ map ("="++) simple
     }
 
@@ -68,6 +68,9 @@ type_ = do
                 , reserved "float" $> Float_
                 , reserved "double" $> Double_
                 , lexeme (string "...") $> VarArgs_
+                , reserved "struct" $> Struct_ <*> identifier
+                , reserved "enum" $> Enum_ <*> identifier
+                , reserved "union" $> Union_ <*> identifier
                 ]
     option t $ reservedOp "*" $> Pointer_ t
 
@@ -86,17 +89,19 @@ val = choice [ try $ D <$> float
              , I <$> integer
              , C <$> charLiteral
              , S <$> stringLiteral
-             , A <$> braces (commaSep val)
              ]
 
 term :: Parser Expression
 term = choice [ Constant <$> val
               , do
                   name <- identifier
-                  choice [ Application name <$> parens (commaSep expr)
+                  choice [ Field name <$> (dot >> identifier)
+                         , Application name <$> parens (commaSep expr)
                          , Index name <$> brackets expr
                          , pure $ Variable name
                          ]
+              , try $ Cast <$> parens type_ <*> expr
+              , InitArr <$> braces (commaSep expr)
               , parens expr
               ]
 
@@ -113,6 +118,7 @@ expr =  buildExpressionParser table term
               ]
             , [ postfix "++"
               , postfix "--"
+              , binary "->" AssocNone
               ]
             , [ binary "*" AssocLeft
               , binary "/" AssocLeft
@@ -179,8 +185,8 @@ statement = semiStatement <|> choice
     , Label <$> identifier <* colon
     ]
 
-topLevel :: Parser Statement
-topLevel = do
+funs :: Parser Statement
+funs = do
     t <- type_
     name <- identifier
     choice $ map try
@@ -191,6 +197,16 @@ topLevel = do
             types <- parens (commaSep (type_ <* optional identifier))
             FDeclaration t name types <$ semi
         ]
+
+topLevel :: Parser Statement
+topLevel = choice [ do
+                      reserved "struct"
+                      name <- identifier
+                      fields <- braces $ many (var <* semi)
+                      semi
+                      pure $ Struct name fields
+                  , funs
+                  ]
 
 block :: Parser Statement
 block = Block <$> (braces . many . lexeme) statement
