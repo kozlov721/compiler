@@ -49,6 +49,16 @@ evaluate' (Index name e) = withReg RCX $ do
         [ sizedInst "mov" size, show o
         , show $ sizeToBytes size, sizedReg RAX size]
 
+evaluate' (Assignment (Index name i) e) = withReg RCX $ do
+    (o, Array_ t _) <- getVar name
+    evaluate i
+    let size = sizeof t
+    fwrite "leaq -{0}(%rbp, %rax, {1}), %rax"
+        [ show o , show $ sizeToBytes size]
+    write "push %rax"
+    evaluate e
+    write "pop %rcx"
+    fwrite "{0} %{1}, (%rcx)" [sizedInst "mov" size, sizedReg RAX size]
 
 evaluate' (Assignment (Variable name) (Constant (A arr))) = do
     (o, Array_ t s) <- getVar name
