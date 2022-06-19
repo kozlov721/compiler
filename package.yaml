@@ -40,9 +40,8 @@ executables:
     source-dirs:         app
     ghc-options:
     - -threaded
-    - -rtsopts
-    - -with-rtsopts=-N
     - -O0
+    cpp-options:
     - -DDEBUG
     dependencies:
     - compiler

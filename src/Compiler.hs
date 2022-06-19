@@ -52,17 +52,21 @@ evaluate' (Index name e) = withReg RCX $ do
 
 evaluate' (Assignment (Variable name) (Constant (A arr))) = do
     (o, Array_ t s) <- getVar name
-    saveArr (arr ++ repeat (last arr)) (sizeof t) o
+    case s of
+        Just size -> do
+            let len = length arr
+            when (len > size) (fail "excess elements in array initializer")
+            saveArr (arr ++ replicate (size - len) (last arr)) (sizeof t) o
+        Nothing -> saveArr arr (sizeof t) o
   where
     saveArr :: [Value] -> Size -> Offset -> ASM ()
-    saveArr _ _ 0 = pure ()
+    saveArr [] _ _ = pure ()
     saveArr (x:xs) size o = do
         let bSize = sizeToBytes size
         evaluate (Constant x)
         fwrite "{0} %{1}, -{2}(%rbp)"
             [sizedInst "mov" size, sizedReg RAX size, show o]
         saveArr xs size (o - bSize)
-    saveArr _ _ _ = error "something went wrong, missaligned offset"
 
 evaluate' (Assignment (Variable name) e) = do
     evaluate e
@@ -237,6 +241,7 @@ generate (Declaration (Var arrT@(Array_ itemT size) name) rhs) = do
             let s = fromMaybe (length arr) size
             let o = s * sizeToBytes (sizeof itemT)
             saveVar arrT name o
+            -- vars . at name ?= (12, arrT)
             evaluate $ Assignment (Variable name) rhs
         Just _ -> fail "rhs of an array definition must be a literal array"
         Nothing -> case size of

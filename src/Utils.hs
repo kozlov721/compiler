@@ -89,8 +89,7 @@ checkUndeclared name = use (vars . at name) >>= \case
 saveVar :: Type -> Identifier -> Offset -> ASM ()
 saveVar t name o = do
     offset <- getsFuture _maxOffset
-    let size = sizeToBytes $ sizeof t
-    modifyBackwards (maxOffset +~ size)
+    modifyBackwards (maxOffset +~ o)
     vars . at name ?= (offset, t)
 
 getVar :: Identifier -> ASM VarRecord
