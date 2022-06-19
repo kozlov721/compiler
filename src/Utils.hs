@@ -16,6 +16,7 @@ import Control.Monad.Tardis
 import Control.Monad.Writer
 import Data.List.Extra      ( lower, upper )
 import Data.Map             ( Map )
+import Data.Maybe           ( fromJust )
 import Text.Format
 
 import qualified Data.Map as M
@@ -31,7 +32,7 @@ type VarRecord = (Offset, Type)
 
 data VarsTable = VarsTable { _table     :: Map String VarRecord
                            , _maxOffset :: Int
-                           }
+                           } deriving ( Show )
 
 data FwState = FwState { _vars    :: VarsTable
                        , _funs    :: Map Identifier [Type]
@@ -87,18 +88,27 @@ pattern Binary op l r = Op op (Just l) (Just r)
 pattern Prefix op e   = Op op Nothing (Just e)
 pattern Postfix op e  = Op op (Just e) Nothing
 
+checkUndeclared :: Identifier -> ASM ()
+checkUndeclared name = use (vars . table . at name) >>= \case
+    Just _  -> fail $ "Variable " ++ show name ++ " already declared."
+    Nothing -> pure ()
+
+saveVar :: Type -> Identifier -> Offset -> ASM ()
+saveVar t name o = do
+    newOffset <- vars . maxOffset <+= o
+    vars . table . at name ?= (newOffset, t)
+
 getVar :: Identifier -> ASM VarRecord
 getVar name = use (vars . table . at name) >>= \case
     Nothing -> fail $ "usage of undeclared varialbe " ++ show name
     Just x  -> pure x
 
-tryLift :: (Integer -> Integer -> Integer) -> Value -> Value -> Maybe Value
+tryLift :: (Int -> Int -> Int) -> Value -> Value -> Maybe Value
 tryLift f (I a) (I b) = Just $ I $ f a b
-tryLift f (C a) (I b) = Just $ I $ f (toInteger (fromEnum a)) b
-tryLift f (I a) (C b) = Just $ I $ f a (toInteger (fromEnum b))
-tryLift f (C a) (C b) = Just $ I
-    $ f (toInteger  (fromEnum b)) (toInteger (fromEnum b))
-tryLift _ _ _ = Nothing
+tryLift f (C a) (I b) = Just $ I $ f (fromEnum a) b
+tryLift f (I a) (C b) = Just $ I $ f a (fromEnum b)
+tryLift f (C a) (C b) = Just $ I $ f (fromEnum b) (fromEnum b)
+tryLift _ _ _         = Nothing
 
 simplify :: Expression -> Expression
 simplify e@(Op op (Just (Constant lhs)) (Just (Constant rhs))) =
@@ -159,7 +169,7 @@ opTable "*" = Just (*)
 opTable _   = Nothing
 
 sizedReg :: Register -> Size -> String
-sizedReg reg Q   = showReg reg
+sizedReg reg Q    = showReg reg
 sizedReg reg size = regs M.! reg M.! size
 
 sizedInst :: String -> Size -> String
@@ -183,35 +193,43 @@ sizeToBytes L = 4
 sizeToBytes Q = 8
 
 sizeof :: Type -> Size
-sizeof Char_          = B
-sizeof Short_         = W
-sizeof Int_           = L
-sizeof Long_          = Q
-sizeof (Pointer_ _ _) = Q
-sizeof VarArgs_       = Q
-sizeof x = error $ "so far udefined sizeof for " ++ show (show x)
+sizeof Char_        = B
+sizeof Short_       = W
+sizeof Int_         = L
+sizeof Long_        = Q
+sizeof (Pointer_ _) = Q
+sizeof VarArgs_     = Q
+sizeof Float_       = L
+sizeof Double_      = Q
+sizeof x            = error $ "so far udefined sizeof for " ++ show (show x)
 
 findType :: Expression -> ASM (Maybe Type)
 findType (Variable name) = Just . snd <$> getVar name
 findType (Binary _ lhs rhs) = findType lhs >>= \case
-    Just t -> pure $ Just t
+    Just t  -> pure $ Just t
     Nothing -> findType rhs
 findType _ = pure Nothing
 
 refToRax :: Identifier -> ASM Size
 refToRax name = do
     getVar name >>= \case
-        (o, Pointer_ t _) -> do
+        (o, Pointer_ t) -> do
             fwrite "movq -{0}(%rbp), %rax" [show o]
             pure $ sizeof t
         _ -> fail "invalid type argument of unary '*'"
+
+saveToOffset :: Offset -> Type -> ASM ()
+saveToOffset o t = do
+    let size = sizeof t
+    fwrite "{0} %{1} -{2}(%rbp)"
+        [sizedInst "mov" size, sizedReg RAX size, show o]
 
 saveResult :: Identifier -> ASM ()
 saveResult name = do
     use (vars . table . at name) >>= \case
         Nothing -> error $ "Assignment to an undefined variable " ++ show name
-        Just (n, t)  -> fwrite "{0} %{1}, -{2}(%rbp)"
-            [sizedInst "mov" size, sizedReg RAX size, show n]
+        Just (o, t)  -> fwrite "{0} %{1}, -{2}(%rbp)"
+            [sizedInst "mov" size, sizedReg RAX size, show o]
           where size = sizeof t
 
 withReg :: Register -> ASM a -> ASM a

@@ -1,21 +1,22 @@
 module AST where
 
-import Data.Word ( Word64 )
-
 type Identifier = String
 data Type = Int_
           | Short_
           | Char_
           | Long_
-          | Pointer_ Type (Maybe Integer)
+          | Array_ Type (Maybe Int)
+          | Pointer_ Type
           | Struct_ [Type]
           | Union_ [Type]
           | VarArgs_
           | Void_
           | Typedef_ String
+          | Float_
+          | Double_
           deriving ( Show, Eq )
 
-data Value = I Integer
+data Value = I Int
            | D Double
            | C Char
            | S String
@@ -27,6 +28,7 @@ data Var = Var { _t    :: Type
 
 data Expression = Variable Identifier
                 | Op String (Maybe Expression) (Maybe Expression)
+                | Index Identifier Expression
                 | Application Identifier [Expression]
                 | Assignment Expression Expression
                 | Constant Value

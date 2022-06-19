@@ -24,7 +24,7 @@ langDef = emptyDef
     , P.commentLine     = "//"
     , P.reservedNames   = [ "return" , "if" , "else" , "while"
                           , "for" , "void" , "char" , "int"
-                          , "double" , "break" , "continue"
+                          , "double", "float" , "break" , "continue"
                           , "goto" , "sizeof", "long", "short"
                           ]
     , P.reservedOpNames =
@@ -54,7 +54,7 @@ whiteSpace    = P.whiteSpace lexer
 float         = P.float lexer
 stringLiteral = P.stringLiteral lexer
 charLiteral   = P.charLiteral lexer
-integer       = P.integer lexer
+integer       = fromInteger <$> P.integer lexer
 commaSep      = P.commaSep lexer
 semiSep       = P.semiSep lexer
 
@@ -65,23 +65,25 @@ type_ = do
                 , reserved "char" $> Char_
                 , reserved "long" $> Long_
                 , reserved "void" $> Void_
+                , reserved "float" $> Float_
+                , reserved "double" $> Double_
                 , lexeme (string "...") $> VarArgs_
                 ]
-    choice [ reservedOp "*" $> Pointer_ t Nothing
-           , Pointer_ t <$> (Just <$> brackets integer)
-           , pure t
-           ]
+    option t $ reservedOp "*" $> Pointer_ t
 
 var :: Parser Var
 var = do
     t <- type_
+    name <- identifier
     if   t == VarArgs_
     then pure (Var VarArgs_ "...")
-    else Var t <$> identifier
+    else option (Var t name) $ do
+        size <- brackets $ optionMaybe integer
+        pure $ Var (Array_ t size) name
 
 val :: Parser Value
 val = choice [ try $ D <$> float
-             , I . fromInteger <$> integer
+             , I <$> integer
              , C <$> charLiteral
              , S <$> stringLiteral
              , A <$> braces (commaSep val)
@@ -91,9 +93,10 @@ term :: Parser Expression
 term = choice [ Constant <$> val
               , do
                   name <- identifier
-                  option (Variable name)
-                         (Application name <$> parens (commaSep expr))
-              , Variable <$> identifier
+                  choice [ Application name <$> parens (commaSep expr)
+                         , Index name <$> brackets expr
+                         , pure $ Variable name
+                         ]
               , parens expr
               ]
 

@@ -1,6 +1,4 @@
-{-# LANGUAGE FlexibleInstances     #-}
-{-# LANGUAGE LambdaCase            #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Compiler ( compile ) where
 
@@ -34,6 +32,7 @@ evaluate' (Constant str@(S _)) = do
     let name = format ".LC{0}" [show lbl]
     globals . at name ?= str
     fwrite "lea {0}(%rip), %rax" [name]
+
 evaluate' (Constant c) = fwrite "mov ${0}, %rax" [showValue c]
 
 evaluate' (Variable name) = do
@@ -41,6 +40,20 @@ evaluate' (Variable name) = do
     let size = sizeof t
     fwrite "{0} -{1}(%rbp), %{2}"
         [sizedInst "mov" size, show o, sizedReg RAX size]
+
+evaluate' (Assignment (Variable name) (Constant (A arr))) = do
+    (o, Array_ t s) <- getVar name
+    saveArr (arr ++ repeat (last arr)) (sizeof t) o
+  where
+    saveArr :: [Value] -> Size -> Offset -> ASM ()
+    saveArr _ _ 0 = pure ()
+    saveArr (x:xs) size o = do
+        let bSize = sizeToBytes size
+        evaluate (Constant x)
+        fwrite "{0} %{1}, -{2}(%rbp)"
+            [sizedInst "mov" size, sizedReg RAX size, show o]
+        saveArr xs size (o - bSize)
+    saveArr _ _ _ = error "something went wrong, missaligned offset"
 
 evaluate' (Assignment (Variable name) e) = do
     evaluate e
@@ -56,11 +69,11 @@ evaluate' (Dereference (Variable name)) = do
     fwrite "{0} (%rax), %{1}" [sizedInst "mov" size, sizedReg RAX size]
 
 evaluate' (Dereference e) = findType e >>= \case
-        Nothing -> fail "invalid type argument of unary '*'"
-        Just t -> do
-            let size = sizeof t
-            evaluate e
-            fwrite "{0} (%rax), %{1}" [sizedInst "mov" size, sizedReg RAX size]
+    Nothing -> fail "invalid type argument of unary '*'"
+    Just t -> do
+        let size = sizeof t
+        evaluate e
+        fwrite "{0} (%rax), %{1}" [sizedInst "mov" size, sizedReg RAX size]
 
 evaluate' (Assignment d@(Dereference (Variable name)) e) = withReg RCX $ do
     evaluate e
@@ -200,13 +213,25 @@ generate (FDefinition t name args body) = do
         fwrite "{0} %{1}, -{2}(%rbp)"
             [sizedInst "mov" size, sizedReg r size, show o]
 
+generate (Declaration (Var arrT@(Array_ itemT size) name) rhs) = do
+    checkUndeclared name
+    case rhs of
+        Just rhs@(Constant (A arr)) -> do
+            let s = fromMaybe (length arr) size
+            let o = s * sizeToBytes (sizeof itemT)
+            saveVar arrT name o
+            evaluate $ Assignment (Variable name) rhs
+        Just _ -> fail "rhs of an array definition must be a literal array"
+        Nothing -> case size of
+            Nothing -> fail "undeclared array without specified size"
+            Just s  -> do
+                let o = s * sizeToBytes (sizeof itemT)
+                saveVar arrT name o
+
 generate (Declaration (Var t name) rhs) = do
-    use (vars . table . at name) >>= \case
-        Just _  -> error $ "Variable " ++ show name ++ " already declared."
-        Nothing -> do
-            let o = sizeToBytes $ sizeof t
-            newOffset <- vars . maxOffset <+= o
-            vars . table . at name ?= (newOffset, t)
+    checkUndeclared name
+    let o = sizeToBytes $ sizeof t
+    saveVar t name o
     case rhs of
         Nothing -> pure ()
         Just e  -> evaluate $ Assignment (Variable name) e
