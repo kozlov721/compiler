@@ -41,6 +41,15 @@ evaluate' (Variable name) = do
     fwrite "{0} -{1}(%rbp), %{2}"
         [sizedInst "mov" size, show o, sizedReg RAX size]
 
+evaluate' (Index name e) = withReg RCX $ do
+    (o, Array_ t _) <- getVar name
+    evaluate e
+    let size = sizeof t
+    fwrite "{0} -{1}(%rbp, %rax, {2}), %{3}"
+        [ sizedInst "mov" size, show o
+        , show $ sizeToBytes size, sizedReg RAX size]
+
+
 evaluate' (Assignment (Variable name) (Constant (A arr))) = do
     (o, Array_ t s) <- getVar name
     saveArr (arr ++ repeat (last arr)) (sizeof t) o
@@ -64,9 +73,19 @@ evaluate' (Reference (Variable name)) = do
     let size = sizeof t
     fwrite "leaq -{0}(%rbp), %rax" [show o]
 
+evaluate' (Reference (Index name e)) = do
+    evaluate e
+    (o, Array_ t _) <- getVar name
+    let size = sizeof t
+    fwrite "leaq -{0}(%rbp, %rax, {1}), %rax"
+        [show o, show . sizeToBytes $ size]
+
 evaluate' (Dereference (Variable name)) = do
     size <- refToRax name
-    fwrite "{0} (%rax), %{1}" [sizedInst "mov" size, sizedReg RAX size]
+    getVar name >>= \case
+        (_, Pointer_ _) -> fwrite "{0} (%rax), %{1}"
+            [sizedInst "mov" size, sizedReg RAX size]
+        _ -> pure ()
 
 evaluate' (Dereference e) = findType e >>= \case
     Nothing -> fail "invalid type argument of unary '*'"
@@ -184,10 +203,10 @@ generate (FDefinition t name args body) = do
     write $ name ++ ":"
 
     vs <- use vars
-    vars .= empty
+    vars .= mempty
     indent += 4
 
-    totOffset <- getsFuture _totVarSize
+    totOffset <- getsFuture _maxOffset
     -- note: `enter` is slow and obsolete, but I don't care here;
     -- it's worht the few extra lines saved when in need to
     -- debug the produced assembly
@@ -195,8 +214,8 @@ generate (FDefinition t name args body) = do
     fillArgs argRegs args
     generate body
 
-    totSize <- use $ vars . maxOffset
-    modifyBackwards (totVarSize .~ totSize)
+    -- totSize <- use $ vars . maxOffset
+    -- modifyBackwards (totVarSize .~ totSize)
     vars .= vs
     when (t == Void_) $ generate $ Return $ Constant $ I 0
     indent -= 4
@@ -208,7 +227,7 @@ generate (FDefinition t name args body) = do
     fillArgs _ [] = pure ()
     fillArgs (r:rs) (v:vs) = do
         generate (Declaration v Nothing)
-        Just (o, t) <- use (vars . table . at (_name v))
+        Just (o, t) <- use (vars . at (_name v))
         let size = sizeof t
         fwrite "{0} %{1}, -{2}(%rbp)"
             [sizedInst "mov" size, sizedReg r size, show o]

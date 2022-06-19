@@ -30,9 +30,9 @@ type Offset = Int
 data Size = B | W | L | Q deriving ( Show, Eq, Ord )
 type VarRecord = (Offset, Type)
 
-data VarsTable = VarsTable { _table     :: Map String VarRecord
-                           , _maxOffset :: Int
-                           } deriving ( Show )
+type VarsTable = Map String VarRecord
+-- data VarsTable = VarsTable { _table     :: Map String VarRecord
+--                            } deriving ( Show )
 
 data FwState = FwState { _vars    :: VarsTable
                        , _funs    :: Map Identifier [Type]
@@ -42,25 +42,25 @@ data FwState = FwState { _vars    :: VarsTable
                        , _loop    :: (String, String)
                        }
 
-newtype BwState = BwState { _totVarSize :: Int }
+newtype BwState = BwState { _maxOffset :: Int }
 
 argRegs :: [Register]
 argRegs = [RDI, RSI, RDX, RCX, R8, R9]
 
 makeLenses ''FwState
 makeLenses ''BwState
-makeLenses ''VarsTable
+-- makeLenses ''VarsTable
 
 class Empty a where
   empty :: a
 
-instance Empty VarsTable where
-  empty = VarsTable { _table = mempty
-                    , _maxOffset = 0
-                    }
+-- instance Empty VarsTable where
+--   empty = VarsTable { _table = mempty
+--                     , _maxOffset = 0
+--                     }
 
 instance Empty FwState where
-  empty = FwState { _vars = empty
+  empty = FwState { _vars = mempty
                   , _funs = mempty
                   , _globals = mempty
                   , _indent = 0
@@ -69,7 +69,7 @@ instance Empty FwState where
                   }
 
 instance Empty BwState where
-  empty = BwState { _totVarSize = 0
+  empty = BwState { _maxOffset = 0
                   }
 
 instance (MonadFix m) => MonadState s (TardisT bw s m) where
@@ -89,17 +89,19 @@ pattern Prefix op e   = Op op Nothing (Just e)
 pattern Postfix op e  = Op op (Just e) Nothing
 
 checkUndeclared :: Identifier -> ASM ()
-checkUndeclared name = use (vars . table . at name) >>= \case
+checkUndeclared name = use (vars . at name) >>= \case
     Just _  -> fail $ "Variable " ++ show name ++ " already declared."
     Nothing -> pure ()
 
 saveVar :: Type -> Identifier -> Offset -> ASM ()
 saveVar t name o = do
-    newOffset <- vars . maxOffset <+= o
-    vars . table . at name ?= (newOffset, t)
+    offset <- getsFuture _maxOffset
+    let size = sizeToBytes $ sizeof t
+    modifyBackwards (maxOffset +~ size)
+    vars . at name ?= (offset, t)
 
 getVar :: Identifier -> ASM VarRecord
-getVar name = use (vars . table . at name) >>= \case
+getVar name = use (vars . at name) >>= \case
     Nothing -> fail $ "usage of undeclared varialbe " ++ show name
     Just x  -> pure x
 
@@ -216,6 +218,9 @@ refToRax name = do
         (o, Pointer_ t) -> do
             fwrite "movq -{0}(%rbp), %rax" [show o]
             pure $ sizeof t
+        (o, Array_ t s) -> do
+            fwrite "movq -{0}(%rbp), %rax" [show o]
+            pure $ sizeof t
         _ -> fail "invalid type argument of unary '*'"
 
 saveToOffset :: Offset -> Type -> ASM ()
@@ -226,7 +231,7 @@ saveToOffset o t = do
 
 saveResult :: Identifier -> ASM ()
 saveResult name = do
-    use (vars . table . at name) >>= \case
+    use (vars . at name) >>= \case
         Nothing -> error $ "Assignment to an undefined variable " ++ show name
         Just (o, t)  -> fwrite "{0} %{1}, -{2}(%rbp)"
             [sizedInst "mov" size, sizedReg RAX size, show o]
