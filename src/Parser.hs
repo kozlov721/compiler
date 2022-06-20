@@ -58,8 +58,8 @@ integer       = fromInteger <$> P.integer lexer
 commaSep      = P.commaSep lexer
 semiSep       = P.semiSep lexer
 
-type_ :: Parser Type
-type_ = do
+typ :: Parser Type
+typ = do
     t <- choice [ reserved "int" $> Int_
                 , reserved "short" $> Short_
                 , reserved "char" $> Char_
@@ -76,7 +76,7 @@ type_ = do
 
 var :: Parser Var
 var = do
-    t <- type_
+    t <- typ
     name <- identifier
     if   t == VarArgs_
     then pure (Var VarArgs_ "...")
@@ -100,7 +100,7 @@ term = choice [ Constant <$> val
                          , Index name <$> brackets expr
                          , pure $ Variable name
                          ]
-              , try $ Cast <$> parens type_ <*> expr
+              , try $ Cast <$> parens typ <*> expr
               , InitArr <$> braces (commaSep expr)
               , parens expr
               ]
@@ -187,14 +187,14 @@ statement = semiStatement <|> choice
 
 funs :: Parser Statement
 funs = do
-    t <- type_
+    t <- typ
     name <- identifier
     choice $ map try
         [ do
             args <- parens (commaSep var)
             FDefinition t name args <$> block
         , do
-            types <- parens (commaSep (type_ <* optional identifier))
+            types <- parens (commaSep (typ <* optional identifier))
             FDeclaration t name types <$ semi
         ]
 

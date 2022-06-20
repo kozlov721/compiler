@@ -76,11 +76,11 @@ instance (MonadFix m) => MonadFail (TardisT bw fw m) where
 type ASM = TardisT BwState FwState (Writer String)
 
 
-pattern Dereference e = Op "*" Nothing (Just e)
-pattern Reference e   = Op "&" Nothing (Just e)
-pattern Binary op l r = Op op (Just l) (Just r)
-pattern Prefix op e   = Op op Nothing (Just e)
-pattern Postfix op e  = Op op (Just e) Nothing
+pattern Dereference  e = Op "*" Nothing (Just e)
+pattern Reference    e = Op "&" Nothing (Just e)
+pattern Binary  op l r = Op op (Just l) (Just r)
+pattern Prefix  op e   = Op op Nothing  (Just e)
+pattern Postfix op e   = Op op (Just e) Nothing
 
 
 checkUndeclared :: Identifier -> ASM ()
@@ -89,10 +89,10 @@ checkUndeclared name = use (vars . at name) >>= \case
     Nothing -> pure ()
 
 saveVar :: Type -> Identifier -> Offset -> ASM ()
-saveVar t name o = do
-    offset <- getsFuture _maxOffset
-    modifyBackwards (maxOffset +~ o)
-    vars . at name ?= (offset, t)
+saveVar typ name offset = do
+    maxOff <- getsFuture _maxOffset
+    modifyBackwards (maxOffset +~ offset)
+    vars . at name ?= (maxOff, typ)
 
 getVar :: Identifier -> ASM VarRecord
 getVar name = use (vars . at name) >>= \case
@@ -152,7 +152,7 @@ sizedReg reg size = regs M.! reg M.! size
           ]
 
 sizedInst :: String -> Size -> String
-sizedInst inst s = inst ++ lower (show s)
+sizedInst inst size = inst ++ lower (show size)
 
 infixl 4 <@>
 (<@>) :: (Foldable t, Monad m) => (a -> m b) -> t a -> m ()
@@ -184,34 +184,35 @@ sizeof x            = error $ "so far udefined sizeof for " ++ show (show x)
 findType :: Expression -> ASM (Maybe Type)
 findType (Variable name) = Just . snd <$> getVar name
 findType (Binary _ lhs rhs) = findType lhs >>= \case
-    Just t  -> pure $ Just t
+    Just typ  -> pure $ Just typ
     Nothing -> findType rhs
 findType _ = pure Nothing
 
 refToRax :: Identifier -> ASM Size
 refToRax name = do
     getVar name >>= \case
-        (o, Pointer_ t) -> do
-            fwrite "movq -{0}(%rbp), %rax" [show o]
-            pure $ sizeof t
-        (o, Array_ t s) -> do
-            fwrite "movq -{0}(%rbp), %rax" [show o]
-            pure $ sizeof t
+        (offset, Pointer_ typ) -> do
+            fwrite "movq -{0}(%rbp), %rax" [show offset]
+            pure $ sizeof typ
+        (offset, Array_ typ s) -> do
+            fwrite "movq -{0}(%rbp), %rax" [show offset]
+            pure $ sizeof typ
         _ -> fail "invalid type argument of unary '*'"
 
 saveToOffset :: Offset -> Type -> ASM ()
-saveToOffset o t = do
-    let size = sizeof t
+saveToOffset offset typ = do
+    let size = sizeof typ
     fwrite "{0} %{1} -{2}(%rbp)"
-        [sizedInst "mov" size, sizedReg RAX size, show o]
+        [sizedInst "mov" size, sizedReg RAX size, show offset]
 
 saveResult :: Identifier -> ASM ()
 saveResult name = do
     use (vars . at name) >>= \case
         Nothing -> error $ "Assignment to an undefined variable " ++ show name
-        Just (o, t)  -> fwrite "{0} %{1}, -{2}(%rbp)"
-            [sizedInst "mov" size, sizedReg RAX size, show o]
-          where size = sizeof t
+        Just (offset, typ) -> do
+            let size = sizeof typ
+            fwrite "{0} %{1}, -{2}(%rbp)"
+                [sizedInst "mov" size, sizedReg RAX size, show offset]
 
 withReg :: Register -> ASM a -> ASM a
 withReg reg m = do
@@ -227,6 +228,9 @@ write str = do
   where
     indentBy str n = replicate n ' ' ++ str
 
+fwrite :: String -> [String] -> ASM ()
+fwrite str = write . format str
+
 label :: String -> ASM ()
 label str = do
     indent -= 2
@@ -237,6 +241,3 @@ newLabel :: ASM String
 newLabel = do
     n <- nlabels <<+= 1
     pure $ format ".L0{0}" [show n]
-
-fwrite :: String -> [String] -> ASM ()
-fwrite str = write . format str

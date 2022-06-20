@@ -6,31 +6,30 @@ import AST
 import Parser ( parseProgram )
 import Utils
 
+import Control.Applicative  ( liftA2 )
 import Control.Monad.State
 import Control.Monad.Tardis
 import Control.Monad.Writer
-
-import Control.Lens    hiding ( Empty, snoc )
-import Data.Char       ( chr, ord )
-import Data.List.Extra ( snoc, unsnoc )
-import Data.Map        ( Map )
-import Data.Maybe      ( fromJust, fromMaybe, isJust, isNothing )
-
+import Data.Char            ( chr, ord )
+import Data.List.Extra      ( snoc, unsnoc )
+import Data.Map             ( Map )
+import Data.Maybe           ( fromJust, fromMaybe, isJust, isNothing )
 import Text.Format
-import Text.Pretty.Simple ( pPrint )
+import Text.Pretty.Simple   ( pPrint )
 
-import           Control.Applicative ( liftA2 )
-import qualified Data.Map            as M
+import Control.Lens hiding ( Empty, snoc )
+
+import qualified Data.Map as M
 
 saveArr :: [(Type, Expression)] -> Offset -> ASM ()
 saveArr [] _ = pure ()
-saveArr ((t, x):xs) o = do
-    let size = sizeof t
+saveArr ((typ, e):es) offset = do
+    let size = sizeof typ
     let bSize = sizeToBytes size
-    evaluate x
+    evaluate e
     fwrite "{0} %{1}, -{2}(%rbp)"
-        [sizedInst "mov" size, sizedReg RAX size, show o]
-    saveArr xs (o - bSize)
+        [sizedInst "mov" size, sizedReg RAX size, show offset]
+    saveArr es (offset - bSize)
 
 evaluate :: Expression -> ASM ()
 evaluate = evaluate' . simplify
@@ -45,55 +44,55 @@ evaluate' (Constant str@(S _)) = do
 evaluate' (Constant c) = fwrite "mov ${0}, %rax" [showValue c]
 
 evaluate' (Variable name) = do
-    (o, t) <- getVar name
-    let size = sizeof t
+    (offset, typ) <- getVar name
+    let size = sizeof typ
     fwrite "{0} -{1}(%rbp), %{2}"
-        [sizedInst "mov" size, show o, sizedReg RAX size]
+        [sizedInst "mov" size, show offset, sizedReg RAX size]
 
 evaluate' (Index name e) = withReg RCX $ do
-    (o, Array_ t _) <- getVar name
+    (offset, Array_ typ _) <- getVar name
     evaluate e
-    let size = sizeof t
+    let size = sizeof typ
     fwrite "{0} -{1}(%rbp, %rax, {2}), %{3}"
-        [ sizedInst "mov" size, show o
+        [ sizedInst "mov" size, show offset
         , show $ sizeToBytes size, sizedReg RAX size]
 
 evaluate' (Assignment (Index name i) e) = withReg RCX $ do
-    (o, Array_ t _) <- getVar name
+    (offset, Array_ typ _) <- getVar name
     evaluate i
-    let size = sizeof t
+    let size = sizeof typ
     fwrite "leaq -{0}(%rbp, %rax, {1}), %rax"
-        [ show o , show $ sizeToBytes size]
+        [ show offset , show $ sizeToBytes size]
     write "push %rax"
     evaluate e
     write "pop %rcx"
     fwrite "{0} %{1}, (%rcx)" [sizedInst "mov" size, sizedReg RAX size]
 
 evaluate' (Assignment (Variable name) (InitArr arr)) = do
-    (o, Array_ t s) <- getVar name
-    case s of
+    (offset, Array_ typ size) <- getVar name
+    case size of
         Just size -> do
             let len = length arr
             when (len > size) (fail "excess elements in array initializer")
             let paddedArr = arr ++ replicate (size - len) (last arr)
-            saveArr (zip (repeat t) paddedArr) o
-        Nothing -> saveArr (zip (repeat t) arr)  o
+            saveArr (zip (repeat typ) paddedArr) offset
+        Nothing -> saveArr (zip (repeat typ) arr) offset
 
 evaluate' (Assignment (Variable name) e) = do
     evaluate e
     saveResult name
 
 evaluate' (Reference (Variable name)) = do
-    (o, t) <- getVar name
-    let size = sizeof t
-    fwrite "leaq -{0}(%rbp), %rax" [show o]
+    (offset, typ) <- getVar name
+    let size = sizeof typ
+    fwrite "leaq -{0}(%rbp), %rax" [show offset]
 
 evaluate' (Reference (Index name e)) = do
     evaluate e
-    (o, Array_ t _) <- getVar name
-    let size = sizeof t
+    (offset, Array_ typ _) <- getVar name
+    let size = sizeof typ
     fwrite "leaq -{0}(%rbp, %rax, {1}), %rax"
-        [show o, show . sizeToBytes $ size]
+        [show offset, show . sizeToBytes $ size]
 
 evaluate' (Dereference (Variable name)) = do
     size <- refToRax name
@@ -104,12 +103,12 @@ evaluate' (Dereference (Variable name)) = do
 
 evaluate' (Dereference e) = findType e >>= \case
     Nothing -> fail "invalid type argument of unary '*'"
-    Just t -> do
-        let size = sizeof t
+    Just typ -> do
+        let size = sizeof typ
         evaluate e
         fwrite "{0} (%rax), %{1}" [sizedInst "mov" size, sizedReg RAX size]
 
-evaluate' (Assignment d@(Dereference (Variable name)) e) = withReg RCX $ do
+evaluate' (Assignment (Dereference (Variable name)) e) = withReg RCX $ do
     evaluate e
     write "mov %rax, %rcx"
     size <- refToRax name
@@ -158,8 +157,8 @@ evaluate' (Binary op lhs rhs)
             write "idiv %ecx"
             when (op == "%") (write "mov %rdx, %rax")
 
-evaluate' (Prefix op x@(Variable name)) = do
-    evaluate' x
+evaluate' (Prefix op v@(Variable name)) = do
+    evaluate' v
     when (op == "--") (write "dec %rax")
     when (op == "++") (write "inc %rax")
     saveResult name
@@ -185,19 +184,19 @@ evaluate' (Application name args) = do
   where
     passArgs :: [Register] -> [(Type, Expression)] -> ASM [Register]
     passArgs _ [] = pure []
-    passArgs [] ((t, e):es) = do
+    passArgs [] ((_, e):es) = do
         -- last argument must be pushed first
         reg <- passArgs [] es
         evaluate e
         write "push %rax"
         pure reg
-    passArgs (r:rs) ((t, e):es) = do
+    passArgs (reg:regs) ((typ, e):es) = do
         evaluate e
-        let size = sizeof t
-        fwrite "push %{0}" [showReg r]
+        let size = sizeof typ
+        fwrite "push %{0}" [showReg reg]
         fwrite "{0} %{1}, %{2}"
-            [sizedInst "mov" size, sizedReg RAX size, sizedReg r size]
-        (r:) <$> passArgs rs es
+            [sizedInst "mov" size, sizedReg RAX size, sizedReg reg size]
+        (reg:) <$> passArgs regs es
 evaluate' x = fail $ show x
 
 generate :: Statement -> ASM ()
@@ -211,9 +210,9 @@ generate (FDeclaration t name args) = do
         Just _  -> fail $ "multiple declarations of function " ++ show name
         Nothing -> funs . at name ?= args
 
-generate (FDefinition t name args body) = do
+generate (FDefinition typ name args (Block body)) = do
     record <- use $ funs . at name
-    when (isNothing record) (generate (FDeclaration t name (_t <$> args)))
+    when (isNothing record) (generate (FDeclaration typ name (_t <$> args)))
     write $ ".globl " ++ name
     write $ name ++ ":"
 
@@ -227,13 +226,16 @@ generate (FDefinition t name args body) = do
     -- debug the produced assembly
     fwrite "enter ${0}, $0" [show totOffset]
     fillArgs argRegs args
-    generate body
-
+    when (null body || notReturn (last body)) $
+        generate $ Return $ Constant $ I 0
+    generate <@> body
     vars .= vs
-    when (t == Void_) $ generate $ Return $ Constant $ I 0
     indent -= 4
     write ""
   where
+    notReturn (Return _) = False
+    notReturn _ = True
+
     fillArgs :: [Register] -> [Var] -> ASM ()
     fillArgs [] (v:vs) = fail
         "More than five arguments not currently supported"
@@ -249,22 +251,21 @@ generate (Declaration (Var arrT@(Array_ itemT size) name) rhs) = do
     checkUndeclared name
     case rhs of
         Just rhs@(InitArr arr) -> do
-            let s = fromMaybe (length arr) size
-            let o = s * sizeToBytes (sizeof itemT)
-            saveVar arrT name o
+            let arrSize = fromMaybe (length arr) size
+            let offset = arrSize * sizeToBytes (sizeof itemT)
+            saveVar arrT name offset
             -- vars . at name ?= (12, arrT)
             evaluate $ Assignment (Variable name) rhs
         Just _ -> fail "rhs of an array definition must be a literal array"
         Nothing -> case size of
             Nothing -> fail "undeclared array without specified size"
-            Just s  -> do
-                let o = s * sizeToBytes (sizeof itemT)
-                saveVar arrT name o
+            Just size  -> do
+                let offset = size * sizeToBytes (sizeof itemT)
+                saveVar arrT name offset
 
-generate (Declaration (Var t name) rhs) = do
+generate (Declaration (Var typ name) rhs) = do
     checkUndeclared name
-    let o = sizeToBytes $ sizeof t
-    saveVar t name o
+    saveVar typ name (sizeToBytes . sizeof $ typ)
     case rhs of
         Nothing -> pure ()
         Just e  -> evaluate $ Assignment (Variable name) e
@@ -277,34 +278,34 @@ generate (Struct name fields) = do
 generate (If cond ifBranch elseBranch) = do
     evaluate cond
     write "cmpl $0, %eax"
-    els <- newLabel
-    end <- newLabel
-    fwrite "je {0}" [els]
+    elseLabel <- newLabel
+    endLabel <- newLabel
+    fwrite "je {0}" [elseLabel]
     generate ifBranch
-    fwrite "jmp {0}" [end]
-    label els
+    fwrite "jmp {0}" [endLabel]
+    label elseLabel
     generate <@> elseBranch
-    label end
+    label endLabel
 
 generate (While cond body) = do
-    begin <- newLabel
-    end <- newLabel
-    (prevBegin, prevEnd) <- loop <<.= (begin, end)
-    label begin
+    beginLabel <- newLabel
+    endLabel <- newLabel
+    (prevBegin, prevEnd) <- loop <<.= (beginLabel, endLabel)
+    label beginLabel
     evaluate cond
     write "cmpl $0, %eax"
-    fwrite "je {0}" [end]
+    fwrite "je {0}" [endLabel]
     generate body
-    fwrite "jmp {0}" [begin]
-    label end
+    fwrite "jmp {0}" [beginLabel]
+    label endLabel
     loop .= (prevBegin, prevEnd)
 
-generate (For ini c upd body@(Block b)) = do
+generate (For ini c upd body@(Block block)) = do
     evaluate <@> ini
     let cond = fromMaybe (Constant (I 1)) c
     generate $ While cond $ case upd of
-        Just u -> Block (b `snoc` Call u)
-        _      -> body
+        Just upd -> Block (block `snoc` Call upd)
+        _        -> body
 
 generate (Call e) = evaluate e
 generate (Block b) = generate <@> b
