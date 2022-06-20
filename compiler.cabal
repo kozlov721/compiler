@@ -80,6 +80,7 @@ test-suite compiler-test
       base >=4.7 && <5
     , compiler
     , containers
+    , directory
     , extra
     , lens
     , mtl
