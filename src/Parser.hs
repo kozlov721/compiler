@@ -2,7 +2,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 module Parser where
 
-import AST
+import AST hiding ( Infix, Prefix, Postfix )
 
 import Text.Parsec
 import Text.Parsec.Expr
@@ -13,8 +13,9 @@ import Text.Pretty.Simple ( pPrint )
 
 import Data.Char    ( isAlpha, toUpper )
 import Data.Functor ( ($>) )
-import Data.Void    ( Void )
+import Control.Applicative (liftA2)
 
+import qualified AST
 import qualified Text.Parsec.Token as P
 
 
@@ -56,33 +57,40 @@ stringLiteral = P.stringLiteral lexer
 charLiteral   = P.charLiteral lexer
 integer       = fromInteger <$> P.integer lexer
 commaSep      = P.commaSep lexer
+commaSep1     = P.commaSep1 lexer
 semiSep       = P.semiSep lexer
 
 typ :: Parser Type
 typ = do
-    t <- choice [ reserved "int" $> Int_
-                , reserved "short" $> Short_
-                , reserved "char" $> Char_
-                , reserved "long" $> Long_
-                , reserved "void" $> Void_
-                , reserved "float" $> Float_
-                , reserved "double" $> Double_
-                , lexeme (string "...") $> VarArgs_
-                , reserved "struct" $> Struct_ <*> identifier
-                , reserved "enum" $> Enum_ <*> identifier
-                , reserved "union" $> Union_ <*> identifier
+    t <- choice [ reserved "int" $> Int
+                , reserved "short" $> Short
+                , reserved "char" $> Char
+                , reserved "long" $> Long
+                , reserved "void" $> Void
+                , reserved "float" $> Float
+                , reserved "double" $> Double
+                , lexeme (string "...") $> VarArgs
+                , reserved "struct" $> Struct <*> identifier
+                , reserved "enum" $> Enum <*> identifier
+                , reserved "union" $> Union <*> identifier
+                , Alias <$> identifier
                 ]
-    option t $ reservedOp "*" $> Pointer_ t
+    option t $ reservedOp "*" $> Pointer t
 
 var :: Parser Var
 var = do
     t <- typ
     name <- identifier
-    if   t == VarArgs_
-    then pure (Var VarArgs_ "...")
+    if   t == VarArgs
+    then pure (Var VarArgs "...")
     else option (Var t name) $ do
         size <- brackets $ optionMaybe integer
-        pure $ Var (Array_ t size) name
+        case size of
+            Just size -> pure $ Var (Array t size) name
+            Nothing -> do
+                arr <- lookAhead
+                    $ reservedOp "=" >> braces (commaSep fieldDesignator)
+                pure $ Var (Array t (fromIntegral (length arr))) name
 
 val :: Parser Value
 val = choice [ try $ D <$> float
@@ -91,17 +99,26 @@ val = choice [ try $ D <$> float
              , S <$> stringLiteral
              ]
 
+fieldDesignator :: Parser FieldDesignator
+fieldDesignator = do
+    field <- optionMaybe $ dot *> identifier <* reservedOp "="
+    FieldDesignator field <$> expr
+
+
 term :: Parser Expression
-term = choice [ Constant <$> val
+term = choice [ Literal <$> val
               , do
                   name <- identifier
                   choice [ Field name <$> (dot >> identifier)
                          , Application name <$> parens (commaSep expr)
-                         , Index name <$> brackets expr
+                         , AST.Infix "[]"
+                            <$> option (Variable name) (parens expr)
+                            <*> brackets expr
                          , pure $ Variable name
                          ]
+              , try $ reserved "sizeof" >> Sizeof <$> parens typ
               , try $ Cast <$> parens typ <*> expr
-              , InitArr <$> braces (commaSep expr)
+              , InitArr <$> braces (commaSep fieldDesignator)
               , parens expr
               ]
 
@@ -146,17 +163,14 @@ expr =  buildExpressionParser table term
               ]
             , [ assign AssocNone ]
             ]
-    infixOp op l r = Op op (Just l) (Just r)
-    prefixOp op  r = Op op Nothing (Just r)
-    postfixOp op l = Op op (Just l) Nothing
     assign         = Infix $ try (reservedOp "=") $> Assignment
     assignMod name = Infix $ do
         try $ reservedOp name
         let op = init name
-        pure $ \lhs rhs -> Assignment lhs $ Op op (Just lhs) (Just rhs)
-    binary name     = Infix   $ try (reservedOp name) $> infixOp name
-    prefix name     = Prefix  $ try (reservedOp name) $> prefixOp name
-    postfix name    = Postfix $ try (reservedOp name) $> prefixOp name
+        pure $ \lhs rhs -> Assignment lhs $ AST.Infix op lhs rhs
+    binary name  = Infix   $ try (reservedOp name) $> AST.Infix name
+    prefix name  = Prefix  $ try (reservedOp name) $> AST.Prefix name
+    postfix name = Postfix $ try (reservedOp name) $> AST.Postfix name
 
 semiStatement :: Parser Statement
 semiStatement = choice
@@ -164,7 +178,7 @@ semiStatement = choice
     , reserved "goto" >> Goto <$> identifier
     , reserved "break" $> Break
     , reserved "continue" $> Continue
-    , Call <$> expr
+    , Expr <$> expr
     , Declaration <$> try var <*> optionMaybe (try (reservedOp "=" >> expr))
     ] <* semi
 
@@ -204,7 +218,19 @@ topLevel = choice [ do
                       name <- identifier
                       fields <- braces $ many (var <* semi)
                       semi
-                      pure $ Struct name fields
+                      pure $ StructDeclaration name fields
+                  , do
+                      reserved "union"
+                      name <- identifier
+                      fields <- braces $ many (var <* semi)
+                      semi
+                      pure $ UnionDeclaration name fields
+                  , do
+                      reserved "enum"
+                      name <- identifier
+                      fields <- braces $ commaSep1 identifier
+                      semi
+                      pure $ EnumDeclaration name fields
                   , funs
                   ]
 
