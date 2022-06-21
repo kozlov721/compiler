@@ -11,37 +11,39 @@ module Utils where
 import AST
 
 import Control.Lens
+import Control.Monad.Extra  ( fromMaybeM )
 import Control.Monad.State
 import Control.Monad.Tardis
 import Control.Monad.Writer
 import Data.List.Extra      ( lower, upper )
 import Data.Map             ( Map )
 import Data.Maybe           ( fromJust )
-import Text.Format
+import Text.Format          ( format )
 
 import qualified Data.Map as M
 
-
-type Offset = Int
+type Size = Integer
+type Offset = Integer
 type VarRecord = (Offset, Type)
+type FunRecord = (Type, [Type])
 type VarsTable = Map String VarRecord
 
 data Register = RAX | RBX | RCX | RDX | RSI | RDI | RSP | RBP
               | R8  | R9  | R10 | R11 | R12 | R13 | R14 | R15
               deriving ( Show, Read, Eq, Ord )
 
-data Size = B | W | L | Q deriving ( Show, Eq, Ord )
-
-data FwState = FwState { _vars    :: VarsTable
-                       , _funs    :: Map Identifier [Type]
-                       , _structs :: Map Identifier [Var]
-                       , _indent  :: Int
-                       , _globals :: Map Identifier Value
-                       , _nlabels :: Int
-                       , _loop    :: (String, String)
+data FwState = FwState { _vars     :: VarsTable
+                       , _funs     :: Map Identifier FunRecord
+                       , _structs  :: Map Identifier [Var]
+                       , _unions   :: Map Identifier [Var]
+                       , _typedefs :: Map Identifier Type
+                       , _indent   :: Int
+                       , _globals  :: Map Identifier Value
+                       , _nlabels  :: Int
+                       , _loop     :: (String, String)
                        }
 
-newtype BwState = BwState { _maxOffset :: Int }
+newtype BwState = BwState { _maxOffset :: Integer }
 
 argRegs :: [Register]
 argRegs = [RDI, RSI, RDX, RCX, R8, R9]
@@ -56,6 +58,8 @@ instance Empty FwState where
   empty = FwState { _vars = mempty
                   , _funs = mempty
                   , _structs = mempty
+                  , _unions = mempty
+                  , _typedefs = mempty
                   , _globals = mempty
                   , _indent = 0
                   , _nlabels = 0
@@ -76,11 +80,13 @@ instance (MonadFix m) => MonadFail (TardisT bw fw m) where
 type ASM = TardisT BwState FwState (Writer String)
 
 
-pattern Dereference  e = Op "*" Nothing (Just e)
-pattern Reference    e = Op "&" Nothing (Just e)
-pattern Binary  op l r = Op op (Just l) (Just r)
-pattern Prefix  op e   = Op op Nothing  (Just e)
-pattern Postfix op e   = Op op (Just e) Nothing
+pattern Dereference  e = Prefix "*" e
+pattern Reference    e = Prefix "&" e
+pattern Index      l r = Infix "[]" l r
+
+infixl 4 <@>
+(<@>) :: (Foldable t, Monad m) => (a -> m b) -> t a -> m ()
+f <@> m = mapM_ f m
 
 
 checkUndeclared :: Identifier -> ASM ()
@@ -94,29 +100,48 @@ saveVar typ name offset = do
     modifyBackwards (maxOffset +~ offset)
     vars . at name ?= (maxOff, typ)
 
-getVar :: Identifier -> ASM VarRecord
-getVar name = use (vars . at name) >>= \case
-    Nothing -> fail $ "usage of undeclared varialbe " ++ show name
+getUnion :: Identifier -> ASM [Var]
+getUnion name = use (structs . at name) >>= \case
+    Nothing -> fail $ "usage of undeclared union " ++ show name
     Just x  -> pure x
 
-tryLiftV :: (Int -> Int -> Int) -> Value -> Value -> Maybe Value
+getStruct :: Identifier -> ASM [Var]
+getStruct name = fromMaybeM
+    (fail $ "usage of undeclared struct " ++ show name)
+    (use (structs . at name))
+
+getVar :: Identifier -> ASM VarRecord
+getVar name = fromMaybeM
+    (fail $ "usage of undeclared variable " ++ show name)
+    (use (vars . at name))
+
+getTypedef :: Identifier -> ASM Type
+getTypedef name = fromMaybeM
+    (fail $ "usage of undefined type alias " ++ show name)
+    (use (typedefs . at name))
+
+convert :: Enum a => a -> Integer
+convert = fromIntegral . fromEnum
+
+tryLiftV :: (Integer -> Integer -> Integer)
+         -> Value -> Value -> Maybe Value
 tryLiftV f (I a) (I b) = Just $ I $ f a b
-tryLiftV f (C a) (I b) = Just $ I $ f (fromEnum a) b
-tryLiftV f (I a) (C b) = Just $ I $ f a (fromEnum b)
-tryLiftV f (C a) (C b) = Just $ I $ f (fromEnum b) (fromEnum b)
+tryLiftV f (C a) (I b) = Just $ I $ f (convert a) b
+tryLiftV f (I a) (C b) = Just $ I $ f a (convert b)
+tryLiftV f (C a) (C b) = Just $ I $ f (convert b) (convert b)
 tryLiftV _ _ _         = Nothing
 
 simplify :: Expression -> Expression
-simplify e@(Op op (Just (Constant lhs)) (Just (Constant rhs))) =
+simplify e@(Infix op (Literal lhs) (Literal rhs)) =
     case opTable op of
-        Just f  -> maybe e Constant (tryLiftV f lhs rhs)
+        Just f  -> maybe e Literal (tryLiftV f lhs rhs)
         Nothing -> e
-simplify e@(Op op lhs rhs)
-    | lhs /= lhs' || rhs /= rhs' = simplify (Op op lhs' rhs')
+simplify e@(Infix op lhs rhs)
+    | lhs /= lhs' || rhs /= rhs' = simplify (Infix op lhs' rhs')
     | otherwise = e
   where
-    lhs' = simplify <$> lhs
-    rhs' = simplify <$> rhs
+    lhs' = simplify lhs
+    rhs' = simplify rhs
 simplify (Assignment lhs rhs) = Assignment (simplify lhs) (simplify rhs)
 simplify e = e
 
@@ -130,33 +155,35 @@ opTable "*" = Just (*)
 opTable _   = Nothing
 
 sizedReg :: Register -> Size -> String
-sizedReg reg Q    = showReg reg
+sizedReg reg 8    = showReg reg
 sizedReg reg size = regs M.! reg M.! size
   where
     regs = M.fromList
-        $ [ (RAX, [(L, "eax"), (W, "ax"), (B, "al" )])
-          , (RBX, [(L, "ebx"), (W, "bx"), (B, "bl" )])
-          , (RCX, [(L, "ecx"), (W, "cx"), (B, "cl" )])
-          , (RDX, [(L, "edx"), (W, "dx"), (B, "dl" )])
-          , (RSI, [(L, "esi"), (W, "si"), (B, "sil")])
-          , (RDI, [(L, "edi"), (W, "di"), (B, "dil")])
-          , (RSP, [(L, "esp"), (W, "sp"), (B, "spl")])
-          , (RBP, [(L, "ebp"), (W, "bp"), (B, "bpl")])
+        $ [ (RAX, [(4, "eax"), (2, "ax"), (1, "al" )])
+          , (RBX, [(4, "ebx"), (2, "bx"), (1, "bl" )])
+          , (RCX, [(4, "ecx"), (2, "cx"), (1, "cl" )])
+          , (RDX, [(4, "edx"), (2, "dx"), (1, "dl" )])
+          , (RSI, [(4, "esi"), (2, "si"), (1, "sil")])
+          , (RDI, [(4, "edi"), (2, "di"), (1, "dil")])
+          , (RSP, [(4, "esp"), (2, "sp"), (1, "spl")])
+          , (RBP, [(4, "ebp"), (2, "bp"), (1, "bpl")])
           ] ++
           [ let reg = "r" ++ show n in
-            (read (upper reg), [ (L, reg ++ "d")
-                               , (W, reg ++ "w")
-                               , (B, reg ++ "b")
+            (read (upper reg), [ (4, reg ++ "d")
+                               , (2, reg ++ "w")
+                               , (1, reg ++ "b")
                                ])
           | n <- [8..15]
           ]
 
-sizedInst :: String -> Size -> String
-sizedInst inst size = inst ++ lower (show size)
+sizeToSuffix :: Size -> String
+sizeToSuffix 1 = "b"
+sizeToSuffix 2 = "w"
+sizeToSuffix 4 = "l"
+sizeToSuffix 8 = "q"
 
-infixl 4 <@>
-(<@>) :: (Foldable t, Monad m) => (a -> m b) -> t a -> m ()
-f <@> m = mapM_ f m
+sizedInst :: String -> Size -> String
+sizedInst inst size = inst ++ sizeToSuffix size
 
 showValue :: Value -> String
 showValue (I x) = show x
@@ -164,53 +191,56 @@ showValue (D x) = show x
 showValue (C x) = show x
 showValue (S x) = show x
 
-sizeToBytes :: Size -> Int
-sizeToBytes B = 1
-sizeToBytes W = 2
-sizeToBytes L = 4
-sizeToBytes Q = 8
+sizeof :: Type -> ASM Size
+sizeof Char          = pure 1
+sizeof Void          = pure 1
+sizeof Short         = pure 2
+sizeof Int           = pure 4
+sizeof Long          = pure 8
+sizeof (Pointer _)   = pure 8
+sizeof VarArgs       = pure 8
+sizeof Float         = pure 4
+sizeof Double        = pure 8
+sizeof (Enum _)      = sizeof Int
+sizeof (Array t s)   = (*s) <$> sizeof t
+sizeof (Struct name) = do
+    vs <- getStruct name
+    sum <$> mapM (sizeof . _t) vs
+sizeof (Union name) = do
+    vs <- getUnion name
+    maximum <$> mapM (sizeof . _t) vs
+sizeof (Alias name) = getTypedef name >>= sizeof
 
-sizeof :: Type -> Size
-sizeof Char_        = B
-sizeof Short_       = W
-sizeof Int_         = L
-sizeof Long_        = Q
-sizeof (Pointer_ _) = Q
-sizeof VarArgs_     = Q
-sizeof Float_       = L
-sizeof Double_      = Q
-sizeof x            = error $ "so far udefined sizeof for " ++ show (show x)
-
-findType :: Expression -> ASM (Maybe Type)
-findType (Variable name) = Just . snd <$> getVar name
-findType (Binary _ lhs rhs) = findType lhs >>= \case
-    Just typ  -> pure $ Just typ
-    Nothing -> findType rhs
-findType _ = pure Nothing
+findPointer :: Expression -> ASM (Maybe VarRecord)
+findPointer (Variable name) = Just <$> getVar name
+findPointer (Infix _ lhs rhs) = findPointer lhs >>= \case
+    Just typ -> pure $ Just typ
+    Nothing  -> findPointer rhs
+findPointer _ = pure Nothing
 
 refToRax :: Identifier -> ASM Size
 refToRax name = do
     getVar name >>= \case
-        (offset, Pointer_ typ) -> do
+        (offset, Pointer typ) -> do
             fwrite "movq -{0}(%rbp), %rax" [show offset]
-            pure $ sizeof typ
-        (offset, Array_ typ s) -> do
+            sizeof typ
+        (offset, Array typ s) -> do
             fwrite "movq -{0}(%rbp), %rax" [show offset]
-            pure $ sizeof typ
+            sizeof typ
         _ -> fail "invalid type argument of unary '*'"
 
 saveToOffset :: Offset -> Type -> ASM ()
 saveToOffset offset typ = do
-    let size = sizeof typ
+    size <- sizeof typ
     fwrite "{0} %{1} -{2}(%rbp)"
         [sizedInst "mov" size, sizedReg RAX size, show offset]
 
 saveResult :: Identifier -> ASM ()
 saveResult name = do
     use (vars . at name) >>= \case
-        Nothing -> error $ "Assignment to an undefined variable " ++ show name
+        Nothing -> fail $ "Assignment to an undefined variable " ++ show name
         Just (offset, typ) -> do
-            let size = sizeof typ
+            size <- sizeof typ
             fwrite "{0} %{1}, -{2}(%rbp)"
                 [sizedInst "mov" size, sizedReg RAX size, show offset]
 
