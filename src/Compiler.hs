@@ -219,8 +219,8 @@ generate (FDefinition typ name args (Block body)) = do
     indent += 4
 
     totOffset <- getsFuture _maxOffset
-    -- note: `enter` is slow and obsolete, but I don't care here;
-    -- it's worht the few extra lines saved when in need to
+    -- note: `enter` is slow and obsolete, but I don't care;
+    -- it's worth the few lines saved when in need to
     -- debug the produced assembly
     fwrite "enter ${0}, $0" [show totOffset]
     fillArgs argRegs args
