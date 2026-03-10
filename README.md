@@ -1,4 +1,9 @@
-# compiler
+# C → x86-64 Compiler
+
+[![License: BSD3](https://img.shields.io/badge/license-BSD3-blue.svg)](LICENSE)
+[![GHC](https://img.shields.io/badge/GHC-9.2-blueviolet.svg)](https://www.haskell.org/ghc/)
+[![Haskell](https://img.shields.io/badge/language-Haskell-5e5086.svg)](https://www.haskell.org/)
+[![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)](Dockerfile)
 
 A toy C-to-x86-64 compiler written in Haskell. It parses a (large) subset of C,
 generates AT&T-syntax x86-64 assembly, and then calls **GCC** to assemble and
