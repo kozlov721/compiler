@@ -154,12 +154,15 @@ evaluate' (Infix op lhs rhs)
             write "mov $0, %rdx"
             write "idiv %ecx"
             when (op == "%") (write "mov %rdx, %rax")
+        when (op == ">>") (write "sarq %cl, %rax")
+        when (op == "<<") (write "salq %cl, %rax")
 
-evaluate' (Prefix op v@(Variable name)) = do
-    evaluate' v
-    when (op == "--") (write "dec %rax")
-    when (op == "++") (write "inc %rax")
-    saveResult name
+evaluate' (Prefix op v@(Variable name))
+    | op `elem` ["++", "--"] = do
+        evaluate' v
+        when (op == "--") (write "dec %rax")
+        when (op == "++") (write "inc %rax")
+        saveResult name
 
 evaluate' (Prefix op e) = do
     evaluate' e
@@ -270,6 +273,13 @@ generate (StructDeclaration name fields) = do
     use (structs . at name) >>= \case
         Just _  -> fail $ "multiple declarations of struct " ++ show name
         Nothing -> structs . at name ?= fields
+
+generate (UnionDeclaration name fields) = do
+    use (unions . at name) >>= \case
+        Just _  -> fail $ "multiple declarations of union " ++ show name
+        Nothing -> unions . at name ?= fields
+
+generate (EnumDeclaration name _) = pure ()
 
 generate (If cond ifBranch elseBranch) = do
     evaluate cond

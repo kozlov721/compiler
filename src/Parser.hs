@@ -148,6 +148,7 @@ expr =  buildExpressionParser table term
               , binary "<<" AssocLeft
               ]
             , [ binary "&" AssocLeft ]
+            , [ binary "^" AssocLeft ]
             , [ binary "|" AssocLeft ]
             , [ binary op AssocNone
               | op <- ["<=", ">=", ">", "<"]

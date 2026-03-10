@@ -101,9 +101,9 @@ saveVar typ name offset = do
     vars . at name ?= (maxOff, typ)
 
 getUnion :: Identifier -> ASM [Var]
-getUnion name = use (structs . at name) >>= \case
-    Nothing -> fail $ "usage of undeclared union " ++ show name
-    Just x  -> pure x
+getUnion name = fromMaybeM
+    (fail $ "usage of undeclared union " ++ show name)
+    (use (unions . at name))
 
 getStruct :: Identifier -> ASM [Var]
 getStruct name = fromMaybeM
