@@ -1,5 +1,6 @@
 # C → x86-64 Compiler
 
+[![CI](https://github.com/kozlov721/compiler/actions/workflows/ci.yml/badge.svg)](https://github.com/kozlov721/compiler/actions/workflows/ci.yml)
 [![License: BSD3](https://img.shields.io/badge/license-BSD3-blue.svg)](LICENSE)
 [![GHC](https://img.shields.io/badge/GHC-9.2-blueviolet.svg)](https://www.haskell.org/ghc/)
 [![Haskell](https://img.shields.io/badge/language-Haskell-5e5086.svg)](https://www.haskell.org/)
